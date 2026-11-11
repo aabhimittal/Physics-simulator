@@ -1,0 +1,15 @@
+[package]
+name = "physics-simulator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+glam = "0.30"
+
+[profile.release]
+lto = true
+panic = "abort"

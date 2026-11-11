@@ -1,0 +1,303 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Rigid Body Lab</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+  /* Layout: the simulation fills the screen. Name and scene picker float at the top,
+     the explanation, energy readout and controls sit along the bottom. */
+  :root {
+    --bg: #e4ebf1;
+    --floor: #d2dce5;
+    --grid: #b3c1ce;
+    --ink: #13253a;
+    --muted: #4a5d73;
+    --panel: #f5f8fa;
+    --line: #c3cfda;
+    --accent: #1f4fd1;
+    --on-accent: #ffffff;
+    --c1: #2a5bd7;
+    --c2: #e3a019;
+    --c3: #169c8c;
+    --c4: #c93a5e;
+    --display: "Space Grotesk", system-ui, sans-serif;
+    --body: "Inter", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1620; --floor: #162231; --grid: #2a3b4f; --ink: #dde7f1; --muted: #9db0c4;
+      --panel: #172433; --line: #2c3e53; --accent: #7aa2ff; --on-accent: #0b1422;
+      --c1: #6b95ff; --c2: #f0b63f; --c3: #37c2b0; --c4: #ec6a8b;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1620; --floor: #162231; --grid: #2a3b4f; --ink: #dde7f1; --muted: #9db0c4;
+    --panel: #172433; --line: #2c3e53; --accent: #7aa2ff; --on-accent: #0b1422;
+    --c1: #6b95ff; --c2: #f0b63f; --c3: #37c2b0; --c4: #ec6a8b;
+    color-scheme: dark;
+  }
+
+  html, body { height: 100%; }
+  body { margin: 0; overflow: hidden; background: var(--bg); color: var(--ink); font: 400 14px/1.45 var(--body); }
+  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+
+  /* Overlays let pointer events through to the canvas except on their controls. */
+  .overlay {
+    position: fixed; left: 0; right: 0; pointer-events: none;
+    display: flex; flex-direction: column; gap: 10px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  .top { top: 0; padding-top: calc(14px + env(safe-area-inset-top, 0px)); }
+  .bottom { bottom: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px)); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  h1 { margin: 0; font: 600 20px/1.1 var(--display); letter-spacing: -0.01em; }
+  #note { margin: 0; max-width: 62ch; font-size: 15px; text-wrap: pretty; }
+  .hint { margin: 0; max-width: 62ch; color: var(--muted); font-size: 12.5px; }
+  #energy { font: 500 13px/1 var(--display); font-variant-numeric: tabular-nums; color: var(--muted); margin-right: auto; }
+
+  button {
+    pointer-events: auto; cursor: pointer;
+    font: 500 13px/1 var(--display); color: var(--ink);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button[aria-pressed="true"], #fire { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+</style>
+
+<canvas id="view" aria-label="3D physics simulation"></canvas>
+
+<div class="overlay top">
+  <h1>Rigid Body Lab</h1>
+  <nav class="row" id="scenes" aria-label="Scene"></nav>
+</div>
+
+<div class="overlay bottom">
+  <p id="note">Loading the simulation.</p>
+  <div class="row">
+    <span id="energy"></span>
+    <button id="fire" type="button">Fire ball</button>
+    <button id="pause" type="button">Pause</button>
+    <button id="reset" type="button">Reset</button>
+  </div>
+  <p class="hint">Drag an object to pull it around. Drag empty space to look around, scroll to zoom, double-click to fire a ball at that spot.</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous"></script>
+<script>
+// Scene ids match src/scenes.rs. `group` = bodies sharing a colour; view = [azimuth, polar, distance, target].
+const SCENES = [
+  { name: 'Brick wall', group: 1, view: [0.45, 1.25, 12, [0, 1.4, 0]],
+    note: '36 bricks at rest. Fire a ball into them, or drag one out of the bottom row.' },
+  { name: 'Dominoes', group: 1, view: [1.9, 0.85, 17, [2.5, 0, 0]],
+    note: 'Each domino only has to tip the next one. Drag one out of the line to stop the wave.' },
+  { name: 'Newton’s cradle', group: 1, view: [0.35, 1.35, 7.5, [0, 1.7, 0]],
+    note: 'Momentum and energy both have to be passed on, so one ball in means one ball out. Pull two balls back and let go.' },
+  { name: 'Chaos', group: 2, view: [0.3, 1.45, 8.5, [0, 2.7, 0]],
+    note: 'Three double pendulums released 0.001 radians apart. They move as one for a few seconds, then go their own ways.' },
+  { name: 'Tennis racket', group: 1, view: [0, 1.25, 8.5, [0, 2.5, 0]],
+    note: 'Zero gravity. Each slab spins about a different axis. Spin about the shortest or longest axis holds steady. Spin about the middle one flips over, again and again.' },
+];
+const DT = 1 / 60;
+const $ = id => document.getElementById(id);
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const canvas = $('view');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 300);
+const sun = new THREE.DirectionalLight(0xffffff, 0.55);
+sun.position.set(7, 14, 9);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 50 });
+scene.add(sun, new THREE.HemisphereLight(0xffffff, 0x8a9bb0, 0.5));
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshLambertMaterial());
+floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
+const rods = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial());
+rods.frustumCulled = false;
+scene.add(floor, rods);
+
+let wasm, current = 0, meshes = [], colors, grid, startEnergy = null;
+let paused = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const orbit = { theta: 0, phi: 1, dist: 10, target: new THREE.Vector3() };
+
+function clearBodies() {
+  for (const m of meshes) {
+    scene.remove(m);
+    m.geometry.dispose();
+  }
+  meshes = [];
+}
+
+// The 3D scene takes its colours from the same CSS tokens as the page, in both themes.
+function applyTheme() {
+  const css = getComputedStyle(document.documentElement);
+  const token = name => new THREE.Color(css.getPropertyValue(name).trim());
+  // Materials are lit in linear light, so their colours need converting; the background is drawn as is.
+  const lit = name => token(name).convertSRGBToLinear();
+  colors = { ink: lit('--ink'), bodies: ['--c1', '--c2', '--c3', '--c4'].map(lit) };
+  scene.background = token('--bg');
+  scene.fog = new THREE.Fog(scene.background, 18, 60); // fog is mixed in after output encoding, so no conversion
+  floor.material.color = lit('--floor');
+  if (grid) scene.remove(grid);
+  grid = new THREE.GridHelper(80, 80, lit('--grid'), lit('--grid'));
+  grid.position.y = 0.003;
+  scene.add(grid);
+  rods.material.color = colors.ink;
+  clearBodies();
+}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+function loadScene(id) {
+  current = id;
+  wasm.load(id);
+  clearBodies();
+  startEnergy = null;
+  const [theta, phi, dist, target] = SCENES[id].view;
+  Object.assign(orbit, { theta, phi, dist });
+  orbit.target.fromArray(target);
+  $('note').textContent = SCENES[id].note;
+  [...$('scenes').children].forEach((b, k) => b.setAttribute('aria-pressed', k === id));
+}
+
+// Copies body poses out of wasm memory into the meshes; creates meshes for new bodies.
+function sync() {
+  const ptr = wasm.state();
+  const [n, joints, energy] = new Float32Array(wasm.memory.buffer, ptr, 3);
+  const s = new Float32Array(wasm.memory.buffer, ptr, 3 + n * 11 + joints * 6);
+  for (let i = 1; i < n; i++) { // body 0 is the ground
+    const b = s.subarray(3 + i * 11, 14 + i * 11);
+    let mesh = meshes[i - 1];
+    if (!mesh) {
+      const box = b[7] === 2;
+      const shape = box ? new THREE.BoxGeometry(2 * b[8], 2 * b[9], 2 * b[10]) : new THREE.SphereGeometry(b[8], 32, 16);
+      const color = colors.bodies[Math.floor((i - 1) / SCENES[current].group) % 4];
+      mesh = new THREE.Mesh(shape, new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
+      mesh.castShadow = mesh.receiveShadow = true;
+      mesh.userData.body = i;
+      if (box) mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(shape), new THREE.LineBasicMaterial({ color: colors.ink })));
+      scene.add(mesh);
+      meshes.push(mesh);
+    }
+    mesh.position.set(b[0], b[1], b[2]);
+    mesh.quaternion.set(b[3], b[4], b[5], b[6]);
+  }
+  rods.geometry.setAttribute('position', new THREE.BufferAttribute(s.slice(3 + n * 11), 3));
+  startEnergy ??= energy;
+  const share = startEnergy > 1e-6 ? ` · ${(100 * energy / startEnergy).toFixed(1)}% of start` : '';
+  $('energy').textContent = `Energy ${energy.toFixed(3)} J${share}`;
+}
+
+// Pointer: grab the body under the cursor, otherwise orbit the camera.
+const ray = new THREE.Raycaster(), pointer = new THREE.Vector2(), dragPlane = new THREE.Plane(), spot = new THREE.Vector3();
+let mode = null, lastX = 0, lastY = 0;
+function aim(x, y) {
+  const r = canvas.getBoundingClientRect();
+  pointer.set((x - r.left) / r.width * 2 - 1, 1 - (y - r.top) / r.height * 2);
+  ray.setFromCamera(pointer, camera);
+}
+function fire() {
+  const o = camera.position, d = ray.ray.direction;
+  wasm.shoot(o.x, o.y, o.z, d.x * 25, d.y * 25, d.z * 25);
+}
+canvas.addEventListener('pointerdown', e => {
+  if (mode) return;
+  canvas.setPointerCapture(e.pointerId);
+  [lastX, lastY] = [e.clientX, e.clientY];
+  aim(e.clientX, e.clientY);
+  const hit = ray.intersectObjects(meshes)[0];
+  mode = hit ? 'grab' : 'orbit';
+  if (hit) {
+    // Drag in the plane that faces the camera and passes through the grabbed point.
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(spot), hit.point);
+    wasm.grab(hit.object.userData.body, hit.point.x, hit.point.y, hit.point.z);
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  if (mode === 'grab') {
+    aim(e.clientX, e.clientY);
+    if (ray.ray.intersectPlane(dragPlane, spot)) wasm.drag(spot.x, Math.max(spot.y, 0.05), spot.z);
+  } else if (mode === 'orbit') {
+    orbit.theta -= (e.clientX - lastX) * 0.006;
+    orbit.phi = clamp(orbit.phi - (e.clientY - lastY) * 0.006, 0.15, 1.5);
+  }
+  [lastX, lastY] = [e.clientX, e.clientY];
+});
+const endPointer = () => {
+  if (mode === 'grab') wasm.release();
+  mode = null;
+};
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  orbit.dist = clamp(orbit.dist * Math.exp(e.deltaY * 0.001), 3, 45);
+}, { passive: false });
+canvas.addEventListener('dblclick', e => {
+  aim(e.clientX, e.clientY);
+  fire();
+});
+
+$('fire').onclick = () => {
+  aim(innerWidth / 2, innerHeight / 2);
+  fire();
+};
+$('reset').onclick = () => loadScene(current);
+$('pause').onclick = () => {
+  paused = !paused;
+  $('pause').textContent = paused ? 'Play' : 'Pause';
+};
+$('pause').textContent = paused ? 'Play' : 'Pause';
+SCENES.forEach((s, id) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = s.name;
+  b.onclick = () => loadScene(id);
+  $('scenes').append(b);
+});
+
+new ResizeObserver(() => {
+  renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+  camera.aspect = canvas.clientWidth / canvas.clientHeight;
+  camera.updateProjectionMatrix();
+}).observe(canvas);
+
+let last = performance.now(), behind = 0;
+function frame(now) {
+  // Fixed 60 Hz physics steps, at most three per drawn frame.
+  behind = Math.min(behind + (now - last) / 1000, 3 * DT);
+  last = now;
+  for (; behind >= DT; behind -= DT) if (!paused) wasm.step(DT);
+  sync();
+  const { theta, phi, target } = orbit;
+  const dist = orbit.dist * Math.max(1, 1.15 / camera.aspect); // step back on tall, narrow screens
+  camera.position.set(Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta)).multiplyScalar(dist).add(target);
+  camera.lookAt(target);
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+fetch('sim.wasm')
+  .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(`HTTP ${r.status}`)))
+  .then(bytes => WebAssembly.instantiate(bytes))
+  .then(({ instance }) => {
+    wasm = instance.exports;
+    applyTheme();
+    loadScene(0);
+    requestAnimationFrame(frame);
+  })
+  .catch(err => {
+    $('note').textContent = `Could not load sim.wasm (${err.message}). Serve this folder over HTTP, for example: python3 -m http.server -d web`;
+  });
+</script>
