@@ -5,7 +5,7 @@ use crate::{Body, Joint, Quat, Shape, Vec3, World, scenes};
 use std::cell::RefCell;
 
 /// Scene ids from here on are robots (`robot::demo`), drawn instead of the rigid-body world.
-const FIRST_ROBOT_SCENE: u32 = 5;
+const FIRST_ROBOT_SCENE: u32 = 6;
 
 struct State {
     world: World,

@@ -13,7 +13,7 @@ python3 -m http.server -d web      # then open http://localhost:8000
 
 Three robot scenes: a cart-pole that swings its pole up and balances it, a
 four-joint arm whose tip follows a moving target, and a motorless double
-pendulum. Five rigid-body scenes: a brick wall, dominoes, Newton's cradle, three double pendulums
+pendulum. Six rigid-body scenes: a block tower, a brick wall, dominoes, Newton's cradle, three double pendulums
 (chaos), and the tennis racket theorem in zero gravity. Drag any object, drag
 empty space to orbit, scroll to zoom, double-click to fire a ball.
 

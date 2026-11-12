@@ -87,6 +87,27 @@ pub fn load(id: u32) -> World {
                 hang(&mut w, upper, Vec3::ZERO, 0.12, 1.0, angle);
             }
         }
+        // Block tower: layers of three planks, each layer turned 90° from the one below.
+        5 => {
+            w.restitution = 0.0;
+            for layer in 0..12 {
+                for i in 0..3 {
+                    let side = (i as f64 - 1.0) * 0.5;
+                    let y = 0.15 + layer as f64 * 0.3;
+                    let turned = layer % 2 == 1;
+                    let pos = if turned {
+                        Vec3::new(side, y, 0.0)
+                    } else {
+                        Vec3::new(0.0, y, side)
+                    };
+                    let mut plank = Body::new(Shape::Box(Vec3::new(0.75, 0.15, 0.25)), 1.0, pos);
+                    if turned {
+                        plank.rot = Quat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+                    }
+                    w.add(plank);
+                }
+            }
+        }
         // Tennis racket theorem, in zero gravity: spin about the smallest and largest
         // inertia axes is stable, spin about the middle one flips over and over.
         _ => {

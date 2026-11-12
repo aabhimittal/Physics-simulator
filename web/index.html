@@ -101,7 +101,9 @@ const SCENES = [
     note: 'Three double pendulums released 0.001 radians apart. They move as one for a few seconds, then go their own ways.' },
   { name: 'Tennis racket', group: 1, view: [0, 1.25, 8.5, [0, 2.5, 0]],
     note: 'Zero gravity. Each slab spins about a different axis. Spin about the shortest or longest axis holds steady. Spin about the middle one flips over, again and again.' },
-  // Robots in joint coordinates (src/robot.rs). Ids 5 and up; see FIRST_ROBOT_SCENE in src/ffi.rs.
+  { name: 'Block tower', group: 3, view: [0.6, 1.2, 10, [0, 1.8, 0]],
+    note: '36 planks in 12 crossed layers. Drag a plank out of the middle and see how long the tower stands, or fire a ball at it.' },
+  // Robots in joint coordinates (src/robot.rs). Ids 6 and up; see FIRST_ROBOT_SCENE in src/ffi.rs.
   { name: 'Cart-pole', robot: true, group: 1, view: [0, 1.35, 7, [0, 1.5, 0]],
     note: 'One motor moves the cart; the pole swings freely. The controller pumps the swing until the pole is nearly upright, then balances it. Drag the pole down and it starts again.' },
   { name: 'Robot arm', robot: true, group: 1, view: [0.7, 1.3, 3.8, [0.3, 0.7, 0]],
@@ -270,7 +272,7 @@ $('pause').onclick = () => {
   $('pause').textContent = paused ? 'Play' : 'Pause';
 };
 $('pause').textContent = paused ? 'Play' : 'Pause';
-[5, 6, 7, 0, 1, 2, 3, 4].forEach(id => { // robots first
+[6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';
@@ -307,7 +309,7 @@ fetch('sim.wasm')
   .then(({ instance }) => {
     wasm = instance.exports;
     applyTheme();
-    loadScene(5);
+    loadScene(6);
     requestAnimationFrame(frame);
   })
   .catch(err => {
