@@ -48,6 +48,28 @@ fn box_stack_stays_put() {
 }
 
 #[test]
+fn block_tower_stands_until_hit() {
+    let mut w = scenes::load(5);
+    let start: Vec<Vec3> = w.bodies.iter().map(|b| b.pos).collect();
+    run(&mut w, 30.0);
+    // Tall stacks are slightly soft: allow 2 cm of sink at the top (3.6 m up), 1 cm sideways.
+    for (b, s) in w.bodies.iter().zip(&start) {
+        let moved = b.pos - *s;
+        close(moved.y, 0.0, 0.02);
+        close(moved.x.hypot(moved.z), 0.0, 0.01);
+    }
+    let ball = w.add(Body::new(Shape::Sphere(0.3), 20.0, dvec3(0.0, 1.5, 6.0)));
+    w.bodies[ball].vel.z = -30.0;
+    run(&mut w, 10.0);
+    let knocked = w.bodies[1..ball]
+        .iter()
+        .zip(&start[1..])
+        .filter(|(b, s)| b.pos.distance(**s) > 0.5)
+        .count();
+    assert!(knocked >= 3, "the ball displaced only {knocked} planks");
+}
+
+#[test]
 fn wall_sleeps_in_place_and_wakes_when_its_support_is_knocked_out() {
     let mut w = scenes::load(0);
     let start: Vec<Vec3> = w.bodies.iter().map(|b| b.pos).collect();

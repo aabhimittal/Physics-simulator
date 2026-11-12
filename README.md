@@ -1,7 +1,8 @@
 # Physics-simulator
 
-A small 3D rigid-body physics engine in Rust, compiled to WebAssembly, with an
-interactive browser demo. Inspired by [MuJoCo](https://github.com/google-deepmind/mujoco);
+Two small physics cores in Rust, compiled to WebAssembly, with an interactive
+browser demo: a robot simulator in joint coordinates with motors, and a 3D
+rigid-body engine for loose objects. Inspired by [MuJoCo](https://github.com/google-deepmind/mujoco);
 not a port of it (see "What this is not").
 
 ## Run the demo
@@ -10,7 +11,9 @@ not a port of it (see "What this is not").
 python3 -m http.server -d web      # then open http://localhost:8000
 ```
 
-Five scenes: a brick wall, dominoes, Newton's cradle, three double pendulums
+Three robot scenes: a cart-pole that swings its pole up and balances it, a
+four-joint arm whose tip follows a moving target, and a motorless double
+pendulum. Six rigid-body scenes: a block tower, a brick wall, dominoes, Newton's cradle, three double pendulums
 (chaos), and the tennis racket theorem in zero gravity. Drag any object, drag
 empty space to orbit, scroll to zoom, double-click to fire a ball.
 
@@ -26,7 +29,25 @@ cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm
 `web/sim.wasm` is committed so the demo runs without a toolchain. Rebuild it
 after changing anything under `src/`.
 
-## How it works
+## How the robot simulator works
+
+`src/robot.rs`. A robot is a tree of links, each joined to its parent by a
+hinge or a slide. The state is one number per joint, so joints cannot come apart.
+
+- **Inverse dynamics** (recursive Newton-Euler) returns the joint forces that
+  produce a given motion. Called with different inputs it also gives the mass
+  matrix, the gravity and Coriolis forces, and the joint effect of a force at any point.
+- **Forward dynamics** solves `M·q̈ = motor + friction − bias`, then integrates with RK4.
+- **Motors** take a command in [-1, 1] scaled by the joint's `gear`. A robot's
+  `controller` function sets the commands every substep (480 Hz).
+
+`tests/robot.rs` checks the pendulum period, mass-matrix symmetry, energy
+conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
+
+Not there yet: contact between robots and anything else, a floating base (so no
+walkers), joint limits, sensors, and loading models from a file.
+
+## How the rigid-body engine works
 
 Each 60 Hz step is split into 20 substeps (`World::step` in `src/lib.rs`):
 
