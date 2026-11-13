@@ -11,7 +11,7 @@ not a port of it (see "What this is not").
 python3 -m http.server -d web      # then open http://localhost:8000
 ```
 
-Three robot scenes: a cart-pole that swings its pole up and balances it, a
+Four robot scenes: a one-legged hopper that balances by foot placement, a cart-pole that swings its pole up and balances it, a
 four-joint arm whose tip follows a moving target, and a motorless double
 pendulum. Six rigid-body scenes: a block tower, a brick wall, dominoes, Newton's cradle, three double pendulums
 (chaos), and the tennis racket theorem in zero gravity. Drag any object, drag
@@ -44,8 +44,12 @@ hinge or a slide. The state is one number per joint, so joints cannot come apart
 `tests/robot.rs` checks the pendulum period, mass-matrix symmetry, energy
 conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
 
-Not there yet: contact between robots and anything else, a floating base (so no
-walkers), joint limits, sensors, and loading models from a file.
+- **Ground contact** is a damped spring plus friction at every box corner below the floor.
+- **A moving base** is three massless joints (x, y, pitch) ahead of the body, so the
+  hopper moves in a plane.
+
+Not there yet: contact between robots and other objects, motion out of the plane,
+joint limits, sensors, and loading models from a file.
 
 ## How the rigid-body engine works
 

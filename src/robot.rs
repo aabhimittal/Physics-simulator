@@ -66,6 +66,12 @@ impl Link {
     }
 }
 
+/// Ground contact: spring (N/m) and damper (N·s/m) per corner, sideways grip (N·s/m), friction coefficient.
+const GROUND_STIFFNESS: f64 = 3.0e4;
+const GROUND_DAMPING: f64 = 300.0;
+const GROUND_GRIP: f64 = 2000.0;
+const GROUND_FRICTION: f64 = 1.0;
+
 /// A force applied at world point `at` on link `link`.
 #[derive(Clone, Copy)]
 pub struct Push {
@@ -95,6 +101,8 @@ pub struct Robot {
     /// Where the controller is trying to go, for display.
     pub target: Option<Vec3>,
     pub pull: Option<Pull>,
+    /// Whether the links collide with the floor at y = 0.
+    pub ground: bool,
 }
 
 impl Robot {
@@ -110,6 +118,7 @@ impl Robot {
             controller: None,
             target: None,
             pull: None,
+            ground: false,
         }
     }
 
@@ -128,14 +137,14 @@ impl Robot {
     }
 
     /// Recursive Newton-Euler: the joint forces needed for accelerations `qdd`
-    /// at state (`q`, `qd`) under `gravity`, with `push` acting on the robot.
+    /// at state (`q`, `qd`) under `gravity`, with `pushes` acting on the robot.
     pub fn inverse_dynamics(
         &self,
         q: &[f64],
         qd: &[f64],
         qdd: &[f64],
         gravity: Vec3,
-        push: Option<Push>,
+        pushes: &[Push],
     ) -> Vec<f64> {
         let n = self.links.len();
         let frames = self.frames(q);
@@ -175,7 +184,7 @@ impl Robot {
             force[i] = f;
             moment[i] = inertia(al) + w.cross(inertia(w)) + rc.cross(f);
         }
-        if let Some(p) = push {
+        for p in pushes {
             force[p.link] -= p.force;
             moment[p.link] -= (p.at - frames[p.link].0).cross(p.force);
         }
@@ -206,37 +215,84 @@ impl Robot {
             .map(|j| {
                 let mut unit = zero.clone();
                 unit[j] = 1.0;
-                self.inverse_dynamics(q, &zero, &unit, Vec3::ZERO, None)
+                self.inverse_dynamics(q, &zero, &unit, Vec3::ZERO, &[])
             })
             .collect();
         columns // symmetric, so columns and rows are the same
     }
 
-    /// Joint forces from motors, joint friction and the mouse spring.
-    fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Option<Push>) {
+    /// Angular velocity and frame-origin velocity of every link.
+    fn velocities(&self, frames: &[(Vec3, Quat)], qd: &[f64]) -> Vec<(Vec3, Vec3)> {
+        let mut out: Vec<(Vec3, Vec3)> = Vec::with_capacity(self.links.len());
+        for (i, l) in self.links.iter().enumerate() {
+            let (wp, vp, op) = l.parent.map_or((Vec3::ZERO, Vec3::ZERO, Vec3::ZERO), |p| {
+                (out[p].0, out[p].1, frames[p].0)
+            });
+            let axis = frames[i].1 * l.axis * qd[i];
+            let carried = vp + wp.cross(frames[i].0 - op);
+            out.push(match l.kind {
+                JointKind::Hinge => (wp + axis, carried),
+                JointKind::Slide => (wp, carried + axis),
+            });
+        }
+        out
+    }
+
+    /// Joint forces from motors and joint friction, plus the outside forces on
+    /// the links: the mouse spring and ground contact.
+    fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Vec<Push>) {
         let tau = (0..q.len())
             .map(|i| {
                 self.links[i].gear * self.ctrl[i].clamp(-1.0, 1.0) - self.links[i].damping * qd[i]
             })
             .collect();
-        let push = self.pull.map(|p| {
-            let (o, rot) = self.frames(q)[p.link];
+        let frames = self.frames(q);
+        let mut pushes = Vec::new();
+        if let Some(p) = self.pull {
+            let (o, rot) = frames[p.link];
             let at = o + rot * p.local;
             let total: f64 = self.links.iter().map(|l| l.mass).sum();
-            Push {
+            pushes.push(Push {
                 link: p.link,
                 at,
                 force: (p.target - at) * (60.0 * total),
+            });
+        }
+        if self.ground {
+            // Soft contact with the floor at y = 0: every box corner below it is pushed
+            // up by a damped spring and held sideways by friction, up to the Coulomb limit.
+            // shortcut: explicit penalty springs need small time steps; an implicit or
+            // constraint-based contact solver (as in MuJoCo) is the upgrade for stiff contact.
+            let vel = self.velocities(&frames, qd);
+            for (link, l) in self.links.iter().enumerate() {
+                for k in 0..8 {
+                    let sign =
+                        Vec3::new((k & 1) as f64, (k >> 1 & 1) as f64, (k >> 2) as f64) * 2.0 - 1.0;
+                    let r = frames[link].1 * (l.com + l.half * sign);
+                    let at = frames[link].0 + r;
+                    if l.mass == 0.0 || at.y >= 0.0 {
+                        continue;
+                    }
+                    let v = vel[link].1 + vel[link].0.cross(r);
+                    let normal = (-GROUND_STIFFNESS * at.y - GROUND_DAMPING * v.y).max(0.0);
+                    let slide = Vec3::new(v.x, 0.0, v.z);
+                    let grip = (slide * -GROUND_GRIP).clamp_length_max(GROUND_FRICTION * normal);
+                    pushes.push(Push {
+                        link,
+                        at,
+                        force: Vec3::Y * normal + grip,
+                    });
+                }
             }
-        });
-        (tau, push)
+        }
+        (tau, pushes)
     }
 
     /// Forward dynamics: solves `M qdd = applied - bias` for the accelerations.
     pub fn accelerations(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
         let n = q.len();
-        let (tau, push) = self.applied(q, qd);
-        let bias = self.inverse_dynamics(q, qd, &vec![0.0; n], self.gravity, push);
+        let (tau, pushes) = self.applied(q, qd);
+        let bias = self.inverse_dynamics(q, qd, &vec![0.0; n], self.gravity, &pushes);
         let mut m = self.mass_matrix(q);
         let mut x: Vec<f64> = (0..n).map(|i| tau[i] - bias[i]).collect();
         // Gaussian elimination. M is symmetric positive definite, so no pivoting is needed.
@@ -433,19 +489,113 @@ fn reach(r: &mut Robot) {
         at: tip,
         force: ((target - tip) * 1500.0).clamp_length_max(120.0),
     };
-    let hold = r.inverse_dynamics(&r.q, &zero, &zero, r.gravity, None); // torques that cancel gravity
-    let pull = r.inverse_dynamics(&r.q, &zero, &zero, Vec3::ZERO, Some(spring)); // minus the spring's joint torques
+    let hold = r.inverse_dynamics(&r.q, &zero, &zero, r.gravity, &[]); // torques that cancel gravity
+    let pull = r.inverse_dynamics(&r.q, &zero, &zero, Vec3::ZERO, &[spring]); // minus the spring's joint torques
     for i in 0..n {
         r.ctrl[i] = (hold[i] - pull[i] - 6.0 * r.qd[i]) / r.links[i].gear;
     }
 }
+
+/// One-legged hopper, free to move in the x-y plane. The first three joints carry
+/// no mass: they are the body's x, y and pitch, which is how a moving base is
+/// expressed in joint coordinates. Then a hip hinge and a sliding, sprung leg.
+pub fn hopper() -> Robot {
+    let free =
+        |parent, kind, axis| Link::new(parent, kind, axis, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0);
+    let body = Link::new(
+        Some(1),
+        JointKind::Hinge,
+        Vec3::Z,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        Vec3::new(0.6, 0.08, 0.1), // long, so the swinging leg barely tips it
+        10.0,
+    );
+    let mut thigh = Link::new(
+        Some(2),
+        JointKind::Hinge,
+        Vec3::Z,
+        Vec3::ZERO,
+        Vec3::Y * -0.25,
+        Vec3::new(0.04, 0.25, 0.04),
+        1.0,
+    );
+    let mut shin = Link::new(
+        Some(3),
+        JointKind::Slide,
+        Vec3::Y,
+        Vec3::Y * -0.5,
+        Vec3::Y * -0.25,
+        Vec3::new(0.03, 0.25, 0.03),
+        0.5,
+    );
+    (thigh.gear, shin.gear) = (100.0, 1000.0);
+    let mut r = Robot::new(vec![
+        free(None, JointKind::Slide, Vec3::X),
+        free(Some(0), JointKind::Slide, Vec3::Y),
+        body,
+        thigh,
+        shin,
+    ]);
+    r.q[1] = 1.3;
+    r.ground = true;
+    r.controller = Some(hop);
+    r
+}
+
+/// Leg length from hip to foot with the leg spring relaxed.
+const HOPPER_LEG: f64 = 1.0;
+
+/// Raibert's hopping controller, three independent rules:
+/// - the leg is a spring, and gets an extra shove while it extends on the ground (hop height);
+/// - in the air, the foot is swung to where it must land to reach the wanted speed (balance and travel);
+/// - on the ground, the hip levels the body (posture).
+fn hop(r: &mut Robot) {
+    // Walk back and forth between two marks, 10 s each way.
+    let goal = if (r.time / 10.0) as u64 % 2 == 0 {
+        2.0
+    } else {
+        -2.0
+    };
+    r.target = Some(Vec3::new(goal, 0.05, 0.0));
+    let (x, speed, pitch, pitch_rate) = (r.q[0], r.qd[0], r.q[2], r.qd[2]);
+    let (leg_angle, leg_rate) = (pitch + r.q[3], pitch_rate + r.qd[3]);
+    let (compression, compression_rate) = (r.q[4], r.qd[4]);
+    let (hip, rot) = r.frames(&r.q)[3];
+    let on_ground = (hip + rot * Vec3::Y * (compression - HOPPER_LEG)).y < 0.01;
+
+    let shove = if on_ground && compression_rate < 0.0 {
+        HOP_SHOVE
+    } else {
+        0.0
+    };
+    let leg_force = -HOP_SPRING * compression - 30.0 * compression_rate - shove;
+    let hip_torque = if on_ground {
+        150.0 * pitch + 15.0 * pitch_rate
+    } else {
+        // Landing with the foot at the middle of the coming stance keeps the speed;
+        // further ahead slows down, further back speeds up.
+        let wanted = (0.8 * (goal - x)).clamp(-0.8, 0.8);
+        let ahead = speed * HOP_STANCE_TIME / 2.0 + 0.06 * (speed - wanted);
+        let aim = (ahead / HOPPER_LEG).clamp(-0.5, 0.5).asin();
+        150.0 * (aim - leg_angle) - 10.0 * leg_rate
+    };
+    r.ctrl[3] = hip_torque / r.links[3].gear;
+    r.ctrl[4] = leg_force / r.links[4].gear;
+}
+
+const HOP_SPRING: f64 = 3000.0;
+const HOP_SHOVE: f64 = 80.0;
+/// Time the foot spends on the ground: half a bounce of the body on the leg spring.
+const HOP_STANCE_TIME: f64 = 0.18;
 
 /// Demo robots, in the order of the web page's robot scenes.
 pub fn demo(id: u32) -> Robot {
     match id {
         0 => cart_pole(),
         1 => arm(),
-        _ => double_pendulum(),
+        2 => double_pendulum(),
+        _ => hopper(),
     }
 }
 

@@ -110,6 +110,8 @@ const SCENES = [
     note: 'Four motors keep the tip on the moving ball: a virtual spring from tip to target, plus the torque that cancels gravity. Drag any link to fight it.' },
   { name: 'Double pendulum', robot: true, group: 1, view: [0, 1.4, 7, [0, 2.2, 0]],
     note: 'Two links and no motors. Nothing adds or removes energy, so the readout should stay at 100% however wild the motion gets.' },
+  { name: 'Hopper', robot: true, group: 1, view: [0, 1.35, 9, [0, 1, 0]],
+    note: 'One springy leg, free to move and fall. It balances only by choosing where to put its foot on each landing, and hops between two marks. Drag the body to shove it.' },
 ];
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
@@ -272,7 +274,7 @@ $('pause').onclick = () => {
   $('pause').textContent = paused ? 'Play' : 'Pause';
 };
 $('pause').textContent = paused ? 'Play' : 'Pause';
-[6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
+[9, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';
@@ -309,7 +311,7 @@ fetch('sim.wasm')
   .then(({ instance }) => {
     wasm = instance.exports;
     applyTheme();
-    loadScene(6);
+    loadScene(9);
     requestAnimationFrame(frame);
   })
   .catch(err => {

@@ -115,3 +115,57 @@ fn arm_tip_follows_the_moving_target() {
         );
     }
 }
+
+#[test]
+fn dropped_box_comes_to_rest_on_the_ground() {
+    let half = dvec3(0.2, 0.1, 0.2);
+    let mut r = Robot::new(vec![Link::new(
+        None,
+        JointKind::Slide,
+        Vec3::Y,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        half,
+        2.0,
+    )]);
+    r.ground = true;
+    r.q[0] = 1.0;
+    for _ in 0..(3.0 / DT) as usize {
+        r.step(DT, 16);
+    }
+    close(r.q[0], 0.1, 0.002);
+    close(r.qd[0], 0.0, 0.01);
+}
+
+#[test]
+fn hopper_travels_between_its_marks_without_falling() {
+    let mut r = robot::hopper();
+    let (mut hops, mut was_up) = (0, false);
+    for frame in 0..(25.0 / DT) as usize {
+        // A sideways shove on the body partway through (about 1 m/s) must not topple it.
+        r.pull = (frame / 60 == 12 && frame % 60 < 18).then(|| Pull {
+            link: 2,
+            local: Vec3::ZERO,
+            target: dvec3(r.q[0] - 0.05, r.q[1], 0.0),
+        });
+        r.step(DT, 16);
+        assert!(
+            r.q[1] > 0.7 && r.q[2].abs() < 0.6,
+            "fell at t = {}: height {}, pitch {}",
+            r.time,
+            r.q[1],
+            r.q[2]
+        );
+        let up = r.q[1] > 1.02;
+        hops += (was_up && !up) as u32;
+        was_up = up;
+        // The goal is x = +2 for the first 10 s, then x = -2 for the next 10.
+        if frame == 10 * 60 {
+            assert!(r.q[0] > 1.5, "only reached x = {} going right", r.q[0]);
+        }
+        if frame == 20 * 60 {
+            assert!(r.q[0] < -1.5, "only reached x = {} going left", r.q[0]);
+        }
+    }
+    assert!(hops >= 30, "only {hops} hops in 25 s");
+}
