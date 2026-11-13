@@ -8,6 +8,7 @@
 use glam::{DQuat as Quat, DVec3 as Vec3};
 
 mod collide;
+pub mod env;
 #[cfg(target_arch = "wasm32")]
 mod ffi;
 pub mod robot;

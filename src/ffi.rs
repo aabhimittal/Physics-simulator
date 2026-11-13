@@ -1,15 +1,20 @@
 //! WebAssembly interface for `web/index.html`. Plain C ABI, no bindings generator.
 
+use crate::env::{Learner, Task};
 use crate::robot::{self, Pull, Robot};
 use crate::{Body, Joint, Quat, Shape, Vec3, World, scenes};
 use std::cell::RefCell;
 
 /// Scene ids from here on are robots (`robot::demo`), drawn instead of the rigid-body world.
 const FIRST_ROBOT_SCENE: u32 = 6;
+/// The cart-pole that learns to balance by trial and error (`env::Learner`).
+const LEARNING_SCENE: u32 = 10;
 
 struct State {
     world: World,
     robot: Option<Robot>,
+    /// Set in the learning scene, where it owns the robot being drawn and `robot` is empty.
+    learner: Option<Learner>,
     out: Vec<f32>,
     /// Body held by the mouse. Its drag joint is always the last joint.
     grabbed: Option<usize>,
@@ -17,7 +22,7 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> =
-        RefCell::new(State { world: scenes::load(0), robot: None, out: Vec::new(), grabbed: None });
+        RefCell::new(State { world: scenes::load(0), robot: None, learner: None, out: Vec::new(), grabbed: None });
 }
 
 fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
@@ -27,8 +32,12 @@ fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
 #[unsafe(no_mangle)]
 pub extern "C" fn load(scene: u32) {
     with(|s| {
-        s.robot = scene.checked_sub(FIRST_ROBOT_SCENE).map(robot::demo);
-        s.world = if s.robot.is_some() {
+        s.learner = (scene == LEARNING_SCENE).then(|| Learner::new(Task::Balance, 1));
+        s.robot = match s.learner {
+            Some(_) => None,
+            None => scene.checked_sub(FIRST_ROBOT_SCENE).map(robot::demo),
+        };
+        s.world = if s.robot.is_some() || s.learner.is_some() {
             World::default()
         } else {
             scenes::load(scene)
@@ -40,6 +49,8 @@ pub extern "C" fn load(scene: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn step(dt: f64) {
     with(|s| match &mut s.robot {
+        // One learner step is one control period, the same length as a frame.
+        None if s.learner.is_some() => s.learner.as_mut().unwrap().tick(),
         // Ground contact is stiff, so robots that touch the floor take smaller steps.
         Some(r) => r.step(dt, if r.ground { 16 } else { 8 }),
         None => s.world.step(dt),
@@ -55,11 +66,16 @@ pub extern "C" fn state() -> *const f32 {
         let w = &s.world;
         // What to draw: the world's bodies, or the ground plus the robot's links and its target.
         let mut draw: Vec<_> = w.bodies.iter().map(|b| (b.pos, b.rot, b.shape)).collect();
-        if let Some(r) = &s.robot {
+        let robot = s
+            .learner
+            .as_ref()
+            .map(|l| &l.env.robot)
+            .or(s.robot.as_ref());
+        if let Some(r) = robot {
             draw.extend(robot::boxes(r));
             draw.extend(r.target.map(|t| (t, Quat::IDENTITY, Shape::Sphere(0.04))));
         }
-        let energy = s.robot.as_ref().map_or_else(|| w.energy(), Robot::energy);
+        let energy = robot.map_or_else(|| w.energy(), Robot::energy);
         s.out.clear();
         s.out
             .extend([draw.len() as f32, w.joints.len() as f32, energy as f32]);
@@ -150,11 +166,27 @@ pub extern "C" fn release() {
 #[unsafe(no_mangle)]
 pub extern "C" fn shoot(ox: f64, oy: f64, oz: f64, vx: f64, vy: f64, vz: f64) {
     with(|s| {
-        if s.robot.is_some() {
+        if s.robot.is_some() || s.learner.is_some() {
             return; // robots have no contact yet, so a ball would pass straight through
         }
         let mut ball = Body::new(Shape::Sphere(0.3), 4.0, Vec3::new(ox, oy, oz));
         ball.vel = Vec3::new(vx, vy, vz);
         s.world.add(ball);
+    })
+}
+
+/// Learning scene: episodes finished so far.
+#[unsafe(no_mangle)]
+pub extern "C" fn trials() -> u32 {
+    with(|s| s.learner.as_ref().map_or(0, |l| l.trials))
+}
+
+/// Learning scene: the longest the pole has stayed up, in seconds.
+#[unsafe(no_mangle)]
+pub extern "C" fn best_seconds() -> f64 {
+    with(|s| {
+        s.learner
+            .as_ref()
+            .map_or(0.0, |l| l.best_return.max(0.0) * crate::env::Env::DT)
     })
 }

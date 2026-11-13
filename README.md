@@ -51,6 +51,24 @@ conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
 Not there yet: contact between robots and other objects, motion out of the plane,
 joint limits, sensors, and loading models from a file.
 
+## Reinforcement-learning interface
+
+`src/env.rs` wraps the robots in the usual contract:
+
+```rust
+let mut env = Env::new(Task::Balance);       // or Task::Hop, Task::Reach
+let mut obs = env.reset(seed);               // same seed, same start
+loop {
+    let step = env.step(&action);            // one number in [-1, 1] per motor
+    // step.obs, step.reward, step.terminated (failed), step.truncated (10 s limit)
+}
+```
+
+`Learner` is a small hill-climbing trainer over a linear policy. It learns to
+balance the cart-pole in a few dozen episodes; the "Learning to balance" scene
+runs it live. `tests/env.rs` checks sizes, seeding, termination, the time limit,
+bad actions, and that learning succeeds for five seeds.
+
 ## How the rigid-body engine works
 
 Each 60 Hz step is split into 20 substeps (`World::step` in `src/lib.rs`):
