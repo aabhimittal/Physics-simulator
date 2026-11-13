@@ -40,7 +40,8 @@ pub extern "C" fn load(scene: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn step(dt: f64) {
     with(|s| match &mut s.robot {
-        Some(r) => r.step(dt, 8),
+        // Ground contact is stiff, so robots that touch the floor take smaller steps.
+        Some(r) => r.step(dt, if r.ground { 16 } else { 8 }),
         None => s.world.step(dt),
     })
 }
