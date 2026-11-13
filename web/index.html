@@ -112,6 +112,8 @@ const SCENES = [
     note: 'Two links and no motors. Nothing adds or removes energy, so the readout should stay at 100% however wild the motion gets.' },
   { name: 'Hopper', robot: true, group: 1, view: [0, 1.35, 9, [0, 1, 0]],
     note: 'One springy leg, free to move and fall. It balances only by choosing where to put its foot on each landing, and hops between two marks. Drag the body to shove it.' },
+  { name: 'Learning to balance', robot: true, learning: true, group: 1, view: [0, 1.35, 7, [0, 1.5, 0]],
+    note: 'Nobody programmed this one. It tries random motor rules, keeps whichever held the pole up longest, and nudges that. Expect a few dozen short failures, then ten-second balances.' },
 ];
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
@@ -210,7 +212,9 @@ function sync() {
   rods.geometry.setAttribute('position', new THREE.BufferAttribute(s.slice(3 + n * 11), 3));
   startEnergy ??= energy;
   const share = startEnergy > 1e-6 ? ` · ${(100 * energy / startEnergy).toFixed(1)}% of start` : '';
-  $('energy').textContent = `Energy ${energy.toFixed(3)} J${share}`;
+  $('energy').textContent = SCENES[current].learning
+    ? `Attempt ${wasm.trials() + 1} · best so far ${wasm.best_seconds().toFixed(1)} s of 10`
+    : `Energy ${energy.toFixed(3)} J${share}`;
 }
 
 // Pointer: grab the body under the cursor, otherwise orbit the camera.
@@ -274,7 +278,7 @@ $('pause').onclick = () => {
   $('pause').textContent = paused ? 'Play' : 'Pause';
 };
 $('pause').textContent = paused ? 'Play' : 'Pause';
-[9, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
+[9, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';
