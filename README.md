@@ -69,6 +69,26 @@ balance the cart-pole in a few dozen episodes; the "Learning to balance" scene
 runs it live. `tests/env.rs` checks sizes, seeding, termination, the time limit,
 bad actions, and that learning succeeds for five seeds.
 
+### From Python
+
+`python/physics_simulator.py` calls the Rust library through its C interface
+(`src/capi.rs`) using only the standard library:
+
+```sh
+cargo build --release
+PYTHONPATH=python python3 -c "
+from physics_simulator import Env
+env = Env('hop')                      # or 'balance', 'reach'
+obs = env.reset(seed=1)
+obs, reward, terminated, truncated = env.step([0.0, 0.0])
+"
+python3 -m unittest discover python   # tests
+```
+
+With `gymnasium` and `numpy` installed, `GymEnv('hop')` is a standard
+`gymnasium.Env` and passes Gymnasium's environment checker, so it can be handed
+to RL libraries that accept Gymnasium environments.
+
 ## How the rigid-body engine works
 
 Each 60 Hz step is split into 20 substeps (`World::step` in `src/lib.rs`):

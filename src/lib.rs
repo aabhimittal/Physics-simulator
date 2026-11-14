@@ -7,6 +7,8 @@
 
 use glam::{DQuat as Quat, DVec3 as Vec3};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod capi;
 mod collide;
 pub mod env;
 #[cfg(target_arch = "wasm32")]
