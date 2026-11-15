@@ -158,7 +158,7 @@ impl Env {
                 let effort: f64 = action.iter().map(|a| a * a).sum();
                 (
                     r.qd[0] + 1.0 - 0.001 * effort,
-                    r.q[1] < 0.7 || r.q[2].abs() > 0.6,
+                    r.q[1] < 0.7 || r.q[2].abs() > 0.2,
                 )
             }
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
