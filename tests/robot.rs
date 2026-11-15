@@ -169,3 +169,23 @@ fn hopper_travels_between_its_marks_without_falling() {
     }
     assert!(hops >= 30, "only {hops} hops in 25 s");
 }
+
+#[test]
+fn joint_limit_stops_a_motor_driving_past_it() {
+    let mut slider = Link::new(
+        None,
+        JointKind::Slide,
+        Vec3::X,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        dvec3(0.1, 0.1, 0.1),
+        1.0,
+    );
+    (slider.gear, slider.range, slider.damping) = (50.0, Some((-0.5, 0.5)), 5.0);
+    let mut r = Robot::new(vec![slider]);
+    r.gravity = Vec3::ZERO;
+    r.ctrl[0] = 1.0;
+    run(&mut r, 3.0);
+    // Rests where the limit spring balances the motor: 50 N / 20000 N/m past the limit.
+    close(r.q[0], 0.5 + 50.0 / 2.0e4, 1e-3);
+}
