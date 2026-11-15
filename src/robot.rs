@@ -36,6 +36,8 @@ pub struct Link {
     pub damping: f64,
     /// Motor force at `ctrl = 1`. 0 means the joint has no motor.
     pub gear: f64,
+    /// Allowed joint travel (min, max). Past it a stiff damped spring pushes back.
+    pub range: Option<(f64, f64)>,
 }
 
 impl Link {
@@ -62,11 +64,15 @@ impl Link {
             half,
             damping: 0.0,
             gear: 0.0,
+            range: None,
         }
     }
 }
 
 /// Ground contact: spring (N/m) and damper (N·s/m) per corner, sideways grip (N·s/m), friction coefficient.
+/// Joint limit spring and damper, per unit of joint travel past the limit.
+const LIMIT_STIFFNESS: f64 = 2.0e4;
+const LIMIT_DAMPING: f64 = 200.0;
 const GROUND_STIFFNESS: f64 = 3.0e4;
 const GROUND_DAMPING: f64 = 300.0;
 const GROUND_GRIP: f64 = 2000.0;
@@ -244,6 +250,14 @@ impl Robot {
         let tau = (0..q.len())
             .map(|i| {
                 self.links[i].gear * self.ctrl[i].clamp(-1.0, 1.0) - self.links[i].damping * qd[i]
+                    + self.links[i].range.map_or(0.0, |(lo, hi)| {
+                        let over = q[i] - q[i].clamp(lo, hi);
+                        if over == 0.0 {
+                            0.0
+                        } else {
+                            -LIMIT_STIFFNESS * over - LIMIT_DAMPING * qd[i]
+                        }
+                    })
             })
             .collect();
         let frames = self.frames(q);
@@ -530,6 +544,8 @@ pub fn hopper() -> Robot {
         0.5,
     );
     (thigh.gear, shin.gear) = (100.0, 1000.0);
+    shin.range = Some((-0.2, 0.3)); // a real leg can only extend so far
+    thigh.range = Some((-1.2, 1.2));
     let mut r = Robot::new(vec![
         free(None, JointKind::Slide, Vec3::X),
         free(Some(0), JointKind::Slide, Vec3::Y),
