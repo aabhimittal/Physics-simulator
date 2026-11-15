@@ -44,13 +44,17 @@ def main():
     total_steps = int(sys.argv[2]) if len(sys.argv) > 2 else 1_000_000
     envs = make_vec_env(lambda: GymEnv(task), n_envs=4, seed=0, vec_env_cls=SubprocVecEnv)
     model = PPO("MlpPolicy", envs, seed=0, device="cpu")
+    best = float("-inf")
     print(f"{'steps':>9} {'return':>8} {'seconds':>8} {'metres':>7}")
     for chunk in range(11):
         if chunk:
             model.learn(total_steps // 10, reset_num_timesteps=False)
         ret, seconds, metres = evaluate(model, task)
         print(f"{model.num_timesteps:>9} {ret:>8.1f} {seconds:>8.2f} {metres:>7.2f}", flush=True)
-    model.save(f"ppo_{task}")
+        # PPO can collapse late in a run, so keep the best checkpoint, not the last.
+        if ret > best:
+            best = ret
+            model.save(f"ppo_{task}")
 
 
 if __name__ == "__main__":
