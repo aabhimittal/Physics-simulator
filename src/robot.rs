@@ -543,7 +543,7 @@ pub fn hopper() -> Robot {
         Vec3::new(0.03, 0.25, 0.03),
         0.5,
     );
-    (thigh.gear, shin.gear) = (100.0, 1000.0);
+    (thigh.gear, shin.gear) = (100.0, 450.0); // leg pushes with about 4x body weight
     shin.range = Some((-0.2, 0.3)); // a real leg can only extend so far
     thigh.range = Some((-1.2, 1.2));
     let mut r = Robot::new(vec![
