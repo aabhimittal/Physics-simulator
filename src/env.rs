@@ -240,3 +240,59 @@ impl Learner {
         }
     }
 }
+
+/// The hopper policy trained by `python/train_hopper.py`: a neural network with two
+/// hidden layers of 64 tanh units, from observation to motor commands.
+pub fn hop_policy(obs: &[f64]) -> Vec<f64> {
+    // Raw little-endian f32: for each layer its weights (one row per output), then its biases.
+    static WEIGHTS: &[u8] = include_bytes!("hop_policy.bin");
+    let mut weights = WEIGHTS
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64);
+    let mut x = obs.to_vec();
+    for (outputs, squash) in [(64, true), (64, true), (2, false)] {
+        let rows: Vec<f64> = weights.by_ref().take(outputs * x.len()).collect();
+        assert_eq!(rows.len(), outputs * x.len(), "hop_policy.bin is too short");
+        x = rows
+            .chunks(x.len())
+            .zip(weights.by_ref())
+            .map(|(row, bias)| row.iter().zip(&x).map(|(w, x)| w * x).sum::<f64>() + bias)
+            .map(|sum| if squash { sum.tanh() } else { sum })
+            .collect();
+    }
+    assert!(weights.next().is_none(), "hop_policy.bin is too long");
+    x
+}
+
+/// Runs the trained hopper policy, one episode after another, for watching and testing.
+pub struct Player {
+    pub env: Env,
+    obs: Vec<f64>,
+    /// Episodes started so far; also the seed of the current one.
+    pub episode: u64,
+    /// Time into the current episode, in seconds.
+    pub seconds: f64,
+}
+
+impl Player {
+    pub fn new(seed: u64) -> Player {
+        let mut env = Env::new(Task::Hop);
+        let obs = env.reset(seed);
+        Player {
+            env,
+            obs,
+            episode: seed,
+            seconds: 0.0,
+        }
+    }
+
+    /// Advances one control period; starts the next episode when this one ends.
+    pub fn tick(&mut self) {
+        let step = self.env.step(&hop_policy(&self.obs));
+        self.seconds += Env::DT;
+        self.obs = step.obs;
+        if step.terminated || step.truncated {
+            *self = Player::new(self.episode + 1);
+        }
+    }
+}

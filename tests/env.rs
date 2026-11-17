@@ -1,6 +1,6 @@
 //! Checks the reinforcement-learning interface.
 
-use physics_simulator::env::{Env, Learner, Task};
+use physics_simulator::env::{Env, Learner, Task, hop_policy};
 
 #[test]
 fn observation_and_action_sizes_match_the_task() {
@@ -82,4 +82,29 @@ fn hill_climbing_learns_to_balance_the_pole() {
             learner.trials
         );
     }
+}
+
+#[test]
+fn trained_policy_hops_the_full_ten_seconds_from_a_hundred_starts() {
+    let mut distances = Vec::new();
+    for seed in 1..=100 {
+        let mut env = Env::new(Task::Hop);
+        let mut obs = env.reset(seed);
+        loop {
+            let s = env.step(&hop_policy(&obs));
+            let x = env.robot.q[0];
+            assert!(!s.terminated, "seed {seed}: fell after {x:.1} m");
+            obs = s.obs;
+            if s.truncated {
+                assert!(x > 30.0, "seed {seed}: only travelled {x:.1} m");
+                distances.push(x);
+                break;
+            }
+        }
+    }
+    distances.sort_by(f64::total_cmp);
+    println!(
+        "10 s runs: {:.1} m shortest, {:.1} m median, {:.1} m longest",
+        distances[0], distances[50], distances[99]
+    );
 }

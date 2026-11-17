@@ -1,6 +1,6 @@
 //! WebAssembly interface for `web/index.html`. Plain C ABI, no bindings generator.
 
-use crate::env::{Learner, Task};
+use crate::env::{Learner, Player, Task};
 use crate::robot::{self, Pull, Robot};
 use crate::{Body, Joint, Quat, Shape, Vec3, World, scenes};
 use std::cell::RefCell;
@@ -9,12 +9,16 @@ use std::cell::RefCell;
 const FIRST_ROBOT_SCENE: u32 = 6;
 /// The cart-pole that learns to balance by trial and error (`env::Learner`).
 const LEARNING_SCENE: u32 = 10;
+/// The hopper driven by the trained policy (`env::Player`).
+const TRAINED_SCENE: u32 = 11;
 
 struct State {
     world: World,
     robot: Option<Robot>,
     /// Set in the learning scene, where it owns the robot being drawn and `robot` is empty.
     learner: Option<Learner>,
+    /// Set in the trained-hopper scene; owns its robot in the same way.
+    player: Option<Player>,
     out: Vec<f32>,
     /// Body held by the mouse. Its drag joint is always the last joint.
     grabbed: Option<usize>,
@@ -22,7 +26,7 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> =
-        RefCell::new(State { world: scenes::load(0), robot: None, learner: None, out: Vec::new(), grabbed: None });
+        RefCell::new(State { world: scenes::load(0), robot: None, learner: None, player: None, out: Vec::new(), grabbed: None });
 }
 
 fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
@@ -33,11 +37,13 @@ fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
 pub extern "C" fn load(scene: u32) {
     with(|s| {
         s.learner = (scene == LEARNING_SCENE).then(|| Learner::new(Task::Balance, 1));
-        s.robot = match s.learner {
-            Some(_) => None,
-            None => scene.checked_sub(FIRST_ROBOT_SCENE).map(robot::demo),
+        s.player = (scene == TRAINED_SCENE).then(|| Player::new(1));
+        s.robot = if s.learner.is_some() || s.player.is_some() {
+            None
+        } else {
+            scene.checked_sub(FIRST_ROBOT_SCENE).map(robot::demo)
         };
-        s.world = if s.robot.is_some() || s.learner.is_some() {
+        s.world = if scene >= FIRST_ROBOT_SCENE {
             World::default()
         } else {
             scenes::load(scene)
@@ -51,6 +57,7 @@ pub extern "C" fn step(dt: f64) {
     with(|s| match &mut s.robot {
         // One learner step is one control period, the same length as a frame.
         None if s.learner.is_some() => s.learner.as_mut().unwrap().tick(),
+        None if s.player.is_some() => s.player.as_mut().unwrap().tick(),
         // Ground contact is stiff, so robots that touch the floor take smaller steps.
         Some(r) => r.step(dt, if r.ground { 16 } else { 8 }),
         None => s.world.step(dt),
@@ -70,10 +77,15 @@ pub extern "C" fn state() -> *const f32 {
             .learner
             .as_ref()
             .map(|l| &l.env.robot)
+            .or(s.player.as_ref().map(|p| &p.env.robot))
             .or(s.robot.as_ref());
         if let Some(r) = robot {
-            draw.extend(robot::boxes(r));
-            draw.extend(r.target.map(|t| (t, Quat::IDENTITY, Shape::Sphere(0.04))));
+            let mut boxes = robot::boxes(r);
+            // The target goes straight after the links, ahead of any leg rods, so it keeps its colour.
+            if let Some(t) = r.target {
+                boxes.insert(r.links.len(), (t, Quat::IDENTITY, Shape::Sphere(0.04)));
+            }
+            draw.extend(boxes);
         }
         let energy = robot.map_or_else(|| w.energy(), Robot::energy);
         s.out.clear();
@@ -166,7 +178,7 @@ pub extern "C" fn release() {
 #[unsafe(no_mangle)]
 pub extern "C" fn shoot(ox: f64, oy: f64, oz: f64, vx: f64, vy: f64, vz: f64) {
     with(|s| {
-        if s.robot.is_some() || s.learner.is_some() {
+        if s.robot.is_some() || s.learner.is_some() || s.player.is_some() {
             return; // robots have no contact yet, so a ball would pass straight through
         }
         let mut ball = Body::new(Shape::Sphere(0.3), 4.0, Vec3::new(ox, oy, oz));
@@ -188,5 +200,17 @@ pub extern "C" fn best_seconds() -> f64 {
         s.learner
             .as_ref()
             .map_or(0.0, |l| l.best_return.max(0.0) * crate::env::Env::DT)
+    })
+}
+
+/// Trained-hopper scene: `[episode number, seconds into it, metres travelled]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn player(field: u32) -> f64 {
+    with(|s| {
+        s.player.as_ref().map_or(0.0, |p| match field {
+            0 => p.episode as f64,
+            1 => p.seconds,
+            _ => p.env.robot.q[0],
+        })
     })
 }
