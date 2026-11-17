@@ -114,6 +114,8 @@ const SCENES = [
     note: 'One springy leg, free to move and fall. It balances only by choosing where to put its foot on each landing, and hops between two marks. Drag the body to shove it.' },
   { name: 'Learning to balance', robot: true, learning: true, group: 1, view: [0, 1.35, 7, [0, 1.5, 0]],
     note: 'Nobody programmed this one. It tries random motor rules, keeps whichever held the pole up longest, and nudges that. Expect a few dozen short failures, then ten-second balances.' },
+  { name: 'Trained hopper', robot: true, trained: true, group: 1, view: [0, 1.35, 9, [0, 1, 0]],
+    note: 'The same hopper, but its motors are driven by a neural network trained by reinforcement learning (PPO, a million steps of practice) to move right without falling. Each run lasts ten seconds, then starts again from a slightly different pose.' },
 ];
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
@@ -183,7 +185,8 @@ function loadScene(id) {
   $('note').textContent = SCENES[id].note;
   [...$('scenes').children].forEach(b => b.setAttribute('aria-pressed', +b.dataset.id === id));
   $('fire').hidden = !!SCENES[id].robot; // robots have no contact yet
-  $('hint').textContent = 'Drag an object to pull it around. Drag empty space to look around, scroll to zoom'
+  const watching = SCENES[id].learning || SCENES[id].trained; // these robots cannot be dragged
+  $('hint').textContent = (watching ? 'Drag' : 'Drag an object to pull it around. Drag empty space') + ' to look around, scroll to zoom'
     + (SCENES[id].robot ? '.' : ', double-click to fire a ball at that spot.');
 }
 
@@ -212,8 +215,11 @@ function sync() {
   rods.geometry.setAttribute('position', new THREE.BufferAttribute(s.slice(3 + n * 11), 3));
   startEnergy ??= energy;
   const share = startEnergy > 1e-6 ? ` · ${(100 * energy / startEnergy).toFixed(1)}% of start` : '';
+  const [run, seconds, metres] = [0, 1, 2].map(wasm.player);
   $('energy').textContent = SCENES[current].learning
     ? `Attempt ${wasm.trials() + 1} · best so far ${wasm.best_seconds().toFixed(1)} s of 10`
+    : SCENES[current].trained
+    ? `Run ${run} · ${metres.toFixed(1)} m in ${seconds.toFixed(1)} s · ${(metres / Math.max(seconds, 0.5)).toFixed(1)} m/s average`
     : `Energy ${energy.toFixed(3)} J${share}`;
 }
 
@@ -278,7 +284,7 @@ $('pause').onclick = () => {
   $('pause').textContent = paused ? 'Play' : 'Pause';
 };
 $('pause').textContent = paused ? 'Play' : 'Pause';
-[9, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
+[9, 11, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots first
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';
@@ -301,6 +307,14 @@ function frame(now) {
   last = now;
   for (; behind >= DT; behind -= DT) if (!paused) wasm.step(DT);
   sync();
+  // The trained hopper travels a long way: keep the camera, the shadow light and the grid
+  // (moved in whole squares, so its lines stay put) on its body, link 2.
+  const ahead = SCENES[current].trained && meshes[2] ? meshes[2].position.x : 0;
+  if (SCENES[current].trained) orbit.target.x = ahead;
+  grid.position.x = Math.round(ahead);
+  sun.position.x = 7 + ahead;
+  sun.target.position.x = ahead;
+  sun.target.updateMatrixWorld();
   const { theta, phi, target } = orbit;
   const dist = orbit.dist * Math.max(1, 1.15 / camera.aspect); // step back on tall, narrow screens
   camera.position.set(Math.sin(phi) * Math.sin(theta), Math.cos(phi), Math.sin(phi) * Math.cos(theta)).multiplyScalar(dist).add(target);

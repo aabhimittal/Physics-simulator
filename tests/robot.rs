@@ -189,3 +189,32 @@ fn joint_limit_stops_a_motor_driving_past_it() {
     // Rests where the limit spring balances the motor: 50 N / 20000 N/m past the limit.
     close(r.q[0], 0.5 + 50.0 / 2.0e4, 1e-3);
 }
+
+#[test]
+fn motor_force_falls_to_zero_at_its_free_speed() {
+    let mut slider = Link::new(
+        None,
+        JointKind::Slide,
+        Vec3::X,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        dvec3(0.1, 0.1, 0.1),
+        1.0,
+    );
+    (slider.gear, slider.free_speed) = (50.0, 2.0);
+    let mut r = Robot::new(vec![slider]);
+    r.gravity = Vec3::ZERO;
+    r.ctrl[0] = 1.0;
+    // From rest the full 50 N acts on 1 kg; at half the free speed, half of it.
+    close(r.accelerations(&[0.0], &[0.0])[0], 50.0, 1e-9);
+    close(r.accelerations(&[0.0], &[1.0])[0], 25.0, 1e-9);
+    // Braking is not weakened by speed, and above the free speed the motor can only brake.
+    r.ctrl[0] = -1.0;
+    close(r.accelerations(&[0.0], &[1.0])[0], -50.0, 1e-9);
+    r.ctrl[0] = 1.0;
+    close(r.accelerations(&[0.0], &[3.0])[0], -25.0, 1e-9);
+    close(r.accelerations(&[0.0], &[9.0])[0], -50.0, 1e-9);
+    // Driven flat out with nothing in the way, it approaches the free speed and stays there.
+    run(&mut r, 2.0);
+    close(r.qd[0], 2.0, 1e-6);
+}

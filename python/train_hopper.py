@@ -2,11 +2,15 @@
 
     pip install stable-baselines3          # pulls in torch, gymnasium, numpy
     cargo build --release
-    python3 python/train_hopper.py [task] [total_steps]     # defaults: hop 1000000
+    python3 python/train_hopper.py [task] [total_steps] [seed]     # defaults: hop 1000000 0
 
 Prints the average result of 10 evaluation episodes before training and after
 every tenth of the run: return, episode length in seconds, and for the hopper
 the distance travelled.
+
+The best checkpoint is saved as ppo_<task>.zip, and its network as ppo_<task>.bin.
+To watch a new hopper policy in the browser, copy ppo_hop.bin over
+src/hop_policy.bin and rebuild web/sim.wasm (see the README).
 """
 
 import sys
@@ -39,11 +43,26 @@ def evaluate(model, task):
     return [t / EPISODES for t in totals]
 
 
+def export(model, path):
+    """Writes the policy network as raw float32: for each layer its weights, then its biases.
+
+    This is the format `hop_policy` in src/env.rs reads. It assumes the default
+    MlpPolicy (two hidden layers of 64 tanh units, observations not normalised).
+    """
+    net = model.policy
+    with open(path, "wb") as out:
+        for layer in [*net.mlp_extractor.policy_net, net.action_net]:
+            if hasattr(layer, "weight"):  # skips the tanh layers
+                out.write(layer.weight.detach().numpy().astype("<f4").tobytes())
+                out.write(layer.bias.detach().numpy().astype("<f4").tobytes())
+
+
 def main():
     task = sys.argv[1] if len(sys.argv) > 1 else "hop"
     total_steps = int(sys.argv[2]) if len(sys.argv) > 2 else 1_000_000
-    envs = make_vec_env(lambda: GymEnv(task), n_envs=4, seed=0, vec_env_cls=SubprocVecEnv)
-    model = PPO("MlpPolicy", envs, seed=0, device="cpu")
+    seed = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    envs = make_vec_env(lambda: GymEnv(task), n_envs=4, seed=seed, vec_env_cls=SubprocVecEnv)
+    model = PPO("MlpPolicy", envs, seed=seed, device="cpu")
     best = float("-inf")
     print(f"{'steps':>9} {'return':>8} {'seconds':>8} {'metres':>7}")
     for chunk in range(11):
@@ -55,6 +74,7 @@ def main():
         if ret > best:
             best = ret
             model.save(f"ppo_{task}")
+            export(model, f"ppo_{task}.bin")
 
 
 if __name__ == "__main__":

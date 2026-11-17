@@ -34,8 +34,12 @@ pub struct Link {
     pub half: Vec3,
     /// Joint friction torque per unit joint speed.
     pub damping: f64,
-    /// Motor force at `ctrl = 1`. 0 means the joint has no motor.
+    /// Motor force at `ctrl = 1` and standstill. 0 means the joint has no motor.
     pub gear: f64,
+    /// Joint speed at which the motor can no longer push: the force it can give
+    /// falls in a straight line from `gear` at standstill to zero here (a DC motor's
+    /// torque-speed line). Infinite means the motor is equally strong at any speed.
+    pub free_speed: f64,
     /// Allowed joint travel (min, max). Past it a stiff damped spring pushes back.
     pub range: Option<(f64, f64)>,
 }
@@ -64,6 +68,7 @@ impl Link {
             half,
             damping: 0.0,
             gear: 0.0,
+            free_speed: f64::INFINITY,
             range: None,
         }
     }
@@ -249,7 +254,12 @@ impl Robot {
     fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Vec<Push>) {
         let tau = (0..q.len())
             .map(|i| {
-                self.links[i].gear * self.ctrl[i].clamp(-1.0, 1.0) - self.links[i].damping * qd[i]
+                // Speed uses up the motor's voltage: moving at a fraction `back` of its free
+                // speed, it can drive forward with only 1 - back of its force. It can still
+                // brake at full force, and past the free speed braking is all it can do.
+                let back = qd[i] / self.links[i].free_speed;
+                let drive = self.ctrl[i].min(1.0 - back).max(-1.0 - back);
+                self.links[i].gear * drive.clamp(-1.0, 1.0) - self.links[i].damping * qd[i]
                     + self.links[i].range.map_or(0.0, |(lo, hi)| {
                         let over = q[i] - q[i].clamp(lo, hi);
                         if over == 0.0 {
@@ -544,6 +554,9 @@ pub fn hopper() -> Robot {
         0.5,
     );
     (thigh.gear, shin.gear) = (100.0, 450.0); // leg pushes with about 4x body weight
+    // Peak power is gear x free speed / 4: 200 W at the hip and 560 W in the leg, about what
+    // electric motors on an 11.5 kg robot can give. Without this the motors have no power limit.
+    (thigh.free_speed, shin.free_speed) = (8.0, 5.0);
     shin.range = Some((-0.2, 0.3)); // a real leg can only extend so far
     thigh.range = Some((-1.2, 1.2));
     let mut r = Robot::new(vec![
@@ -616,11 +629,23 @@ pub fn demo(id: u32) -> Robot {
 }
 
 /// Boxes to draw: world position, orientation and half extents, one per link.
+/// After those, a thin rod for each link that slides on another link (the hopper's
+/// shin), reaching back into the parent so the leg is not drawn in two pieces when it extends.
 pub fn boxes(r: &Robot) -> Vec<(Vec3, Quat, Shape)> {
     let frames = r.frames(&r.q);
-    r.links
-        .iter()
-        .zip(frames)
-        .map(|(l, (o, rot))| (o + rot * l.com, rot, Shape::Box(l.half)))
+    let links = r.links.iter().zip(&frames);
+    let rods = links
+        .clone()
+        .filter(|(l, _)| l.kind == JointKind::Slide && l.parent.is_some() && l.mass > 0.0)
+        .map(|(l, &(o, rot))| {
+            (
+                o,
+                rot,
+                Shape::Box(Vec3::splat(0.015) + l.axis.abs() * 0.235),
+            )
+        });
+    links
+        .map(|(l, &(o, rot))| (o + rot * l.com, rot, Shape::Box(l.half)))
+        .chain(rods)
         .collect()
 }
