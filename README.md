@@ -11,7 +11,7 @@ not a port of it (see "What this is not").
 python3 -m http.server -d web      # then open http://localhost:8000
 ```
 
-Six robot scenes: a one-legged hopper that balances by foot placement, the same
+A walking person and a car on a circular road. Six robot scenes: a one-legged hopper that balances by foot placement, the same
 hopper run by a trained neural network, a cart-pole that swings its pole up and
 balances it, a cart-pole that learns to balance while you watch, a
 four-joint arm whose tip follows a moving target, and a motorless double
@@ -54,8 +54,8 @@ conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
 - **A moving base** is three massless joints (x, y, pitch) ahead of the body, so the
   hopper moves in a plane.
 
-Not there yet: contact between robots and other objects, motion out of the plane,
-sensors, and loading models from a file.
+Not there yet: contact between robots and other objects (the walker and the car do not
+meet), motion out of the plane, sensors, and loading models from a file.
 
 ## Reinforcement-learning interface
 
@@ -129,6 +129,40 @@ could reach. The limit barely changes how fast the hopper travels, because that
 depends more on leg force than on motor power. The limited policies also fall
 far less often, perhaps because a motor that weakens as it speeds up gives
 smoother, more repeatable hops.
+
+## Walking person
+
+`robot::walker` is a 70 kg planar body (torso, then thigh, shin and foot per leg) with
+hip, knee and ankle motors about as strong as human muscle. It is driven by SIMBICON
+(Yin, Loken and van de Panne, 2007): a four-phase cycle of PD targets, the stance hip
+holding the torso upright, and foot placement that steps further ahead the faster and
+further the body is ahead of the stance foot. Retuned for this body it walks at
+1.2 m/s, 1.9 steps per second and 0.6 m a step, inside the human range, and recovers
+from 250 N shoves either way (a forward shove makes it lunge, hips down to 0.67 m).
+
+## Car
+
+`src/vehicle.rs` is a raycast vehicle, the usual game-engine design: a rigid body in
+the `World` carried by four ray-cast spring-damper suspensions, with tyre forces from
+Pacejka's Magic Formula capped by the friction circle. Rear-wheel drive through an open
+differential, 90 kW, front-biased brakes with ABS, Ackermann steering, aero drag and
+rolling resistance. Each wheel's spin is stepped implicitly, since the tyre makes it stiff.
+`tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.1 m against the
+ideal v²/2μg = 39.3 m, 0-100 km/h in 8.4 s, and sideways acceleration v²/r on its circle.
+In the browser it drives itself; arrow keys or WASD take over. It shows load transfer,
+body roll, understeer at full lock, and power oversteer (a steady drift) under full
+throttle in a bend.
+
+Limits: wheels only meet flat ground (no kerbs or ramps, and they pass through other
+bodies, though the car body itself collides); one gear; no anti-roll bars.
+
+## Implicit joint damping
+
+The robot integrator solves `(M + h·D + h²·K) q̈ = forces` each RK4 stage, where D and K
+are each joint's own damping and stiffness (joint friction, joint limits, and a motor
+past its free speed). Stiff dampers on light links such as a foot otherwise overshoot
+every step; a knocked-down walker gained momentum from nothing and slid off at 100 m/s.
+`tests/robot.rs` checks that it now comes to rest.
 
 ## How the rigid-body engine works
 

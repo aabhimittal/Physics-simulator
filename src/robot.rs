@@ -111,6 +111,9 @@ pub struct Robot {
     pub controller: Option<fn(&mut Robot)>,
     /// Where the controller is trying to go, for display.
     pub target: Option<Vec3>,
+    /// Whatever the controller needs to remember between calls. The walker keeps its
+    /// stance leg (0 or 1), when the current phase began, and how many steps it has taken.
+    pub memory: [f64; 3],
     pub pull: Option<Pull>,
     /// Whether the links collide with the floor at y = 0.
     pub ground: bool,
@@ -128,6 +131,7 @@ impl Robot {
             time: 0.0,
             controller: None,
             target: None,
+            memory: [0.0; 3],
             pull: None,
             ground: false,
         }
@@ -251,25 +255,37 @@ impl Robot {
 
     /// Joint forces from motors and joint friction, plus the outside forces on
     /// the links: the mouse spring and ground contact.
-    fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Vec<Push>) {
-        let tau = (0..q.len())
+    ///
+    /// Also returns, per joint, how fast its own joint force falls with joint speed and
+    /// with joint position (damping and stiffness), so `step` can treat those implicitly.
+    fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>, Vec<Push>) {
+        let (tau, stiff) = (0..q.len())
             .map(|i| {
+                let l = &self.links[i];
                 // Speed uses up the motor's voltage: moving at a fraction `back` of its free
                 // speed, it can drive forward with only 1 - back of its force. It can still
                 // brake at full force, and past the free speed braking is all it can do.
-                let back = qd[i] / self.links[i].free_speed;
-                let drive = self.ctrl[i].min(1.0 - back).max(-1.0 - back);
-                self.links[i].gear * drive.clamp(-1.0, 1.0) - self.links[i].damping * qd[i]
-                    + self.links[i].range.map_or(0.0, |(lo, hi)| {
-                        let over = q[i] - q[i].clamp(lo, hi);
-                        if over == 0.0 {
-                            0.0
-                        } else {
-                            -LIMIT_STIFFNESS * over - LIMIT_DAMPING * qd[i]
-                        }
-                    })
+                let back = qd[i] / l.free_speed;
+                let drive = self.ctrl[i].clamp(-1.0 - back, 1.0 - back);
+                let speed_bound = drive != self.ctrl[i] && drive.abs() < 1.0;
+                let mut damping = l.damping
+                    + if speed_bound {
+                        l.gear / l.free_speed
+                    } else {
+                        0.0
+                    };
+                let mut stiffness = 0.0;
+                let mut tau = l.gear * drive.clamp(-1.0, 1.0) - l.damping * qd[i];
+                if let Some((lo, hi)) = l.range {
+                    let over = q[i] - q[i].clamp(lo, hi);
+                    if over != 0.0 {
+                        tau += -LIMIT_STIFFNESS * over - LIMIT_DAMPING * qd[i];
+                        (damping, stiffness) = (damping + LIMIT_DAMPING, LIMIT_STIFFNESS);
+                    }
+                }
+                (tau, (damping, stiffness))
             })
-            .collect();
+            .unzip();
         let frames = self.frames(q);
         let mut pushes = Vec::new();
         if let Some(p) = self.pull {
@@ -309,15 +325,27 @@ impl Robot {
                 }
             }
         }
-        (tau, pushes)
+        (tau, stiff, pushes)
     }
 
     /// Forward dynamics: solves `M qdd = applied - bias` for the accelerations.
     pub fn accelerations(&self, q: &[f64], qd: &[f64]) -> Vec<f64> {
+        self.accelerations_over(q, qd, 0.0)
+    }
+
+    /// Accelerations for a time step `h`, with each joint's own damping and stiffness
+    /// taken implicitly: solves (M + h·D + h²·K) q̈ = forces, as MuJoCo does for damping.
+    /// A stiff joint damper (a limit, or a motor past its free speed) on a light link, such
+    /// as a foot, otherwise overshoots every step, and the error shows up as momentum from
+    /// nowhere: a fallen walker sliding faster and faster along the floor.
+    fn accelerations_over(&self, q: &[f64], qd: &[f64], h: f64) -> Vec<f64> {
         let n = q.len();
-        let (tau, pushes) = self.applied(q, qd);
+        let (tau, stiff, pushes) = self.applied(q, qd);
         let bias = self.inverse_dynamics(q, qd, &vec![0.0; n], self.gravity, &pushes);
         let mut m = self.mass_matrix(q);
+        for (i, (damping, stiffness)) in stiff.into_iter().enumerate() {
+            m[i][i] += h * damping + h * h * stiffness;
+        }
         let mut x: Vec<f64> = (0..n).map(|i| tau[i] - bias[i]).collect();
         // Gaussian elimination. M is symmetric positive definite, so no pivoting is needed.
         for i in 0..n {
@@ -349,13 +377,13 @@ impl Robot {
                 controller(self);
             }
             let (q, v) = (self.q.clone(), self.qd.clone());
-            let a1 = self.accelerations(&q, &v);
+            let a1 = self.accelerations_over(&q, &v, h);
             let (q2, v2) = (add(&q, &v, h / 2.0), add(&v, &a1, h / 2.0));
-            let a2 = self.accelerations(&q2, &v2);
+            let a2 = self.accelerations_over(&q2, &v2, h);
             let (q3, v3) = (add(&q, &v2, h / 2.0), add(&v, &a2, h / 2.0));
-            let a3 = self.accelerations(&q3, &v3);
+            let a3 = self.accelerations_over(&q3, &v3, h);
             let (q4, v4) = (add(&q, &v3, h), add(&v, &a3, h));
-            let a4 = self.accelerations(&q4, &v4);
+            let a4 = self.accelerations_over(&q4, &v4, h);
             for i in 0..q.len() {
                 self.q[i] += h / 6.0 * (v[i] + 2.0 * v2[i] + 2.0 * v3[i] + v4[i]);
                 self.qd[i] += h / 6.0 * (a1[i] + 2.0 * a2[i] + 2.0 * a3[i] + a4[i]);
@@ -618,13 +646,200 @@ const HOP_SHOVE: f64 = 80.0;
 /// Time the foot spends on the ground: half a bounce of the body on the leg spring.
 const HOP_STANCE_TIME: f64 = 0.18;
 
+/// A walking person, 70 kg and 1.6 m from sole to the top of the torso, free to move
+/// and fall in the x-y plane (like the hopper): torso, then for each leg a thigh, shin
+/// and foot, joined by hip, knee and ankle motors about as strong as human muscle.
+pub fn walker() -> Robot {
+    let free =
+        |parent, kind, axis| Link::new(parent, kind, axis, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0);
+    let torso = Link::new(
+        Some(1),
+        JointKind::Hinge,
+        Vec3::Z,
+        Vec3::ZERO,
+        Vec3::Y * 0.32,
+        Vec3::new(0.1, 0.32, 0.15),
+        47.0,
+    );
+    let mut links = vec![
+        free(None, JointKind::Slide, Vec3::X),
+        free(Some(0), JointKind::Slide, Vec3::Y),
+        torso,
+    ];
+    for side in [1.0, -1.0] {
+        let hip = links.len();
+        let segment = |parent, pos: Vec3, com, half, mass, strength: f64, range| {
+            let mut l = Link::new(
+                Some(parent),
+                JointKind::Hinge,
+                Vec3::Z,
+                pos,
+                com,
+                half,
+                mass,
+            );
+            (l.gear, l.free_speed, l.range) = (strength, 12.0, range);
+            l
+        };
+        // The legs sit 0.1 m to either side; they move in the same plane.
+        links.push(segment(
+            2,
+            Vec3::Z * (0.1 * side),
+            Vec3::Y * -0.22,
+            Vec3::new(0.06, 0.22, 0.06),
+            7.0,
+            300.0,
+            Some((-1.2, 1.8)),
+        ));
+        links.push(segment(
+            hip,
+            Vec3::Y * -0.44,
+            Vec3::Y * -0.21,
+            Vec3::new(0.045, 0.21, 0.045),
+            3.3,
+            300.0,
+            Some((-2.4, 0.0)),
+        ));
+        links.push(segment(
+            hip + 1,
+            Vec3::Y * -0.42,
+            Vec3::new(0.05, -0.04, 0.0),
+            Vec3::new(0.11, 0.035, 0.045),
+            1.0,
+            200.0,
+            None,
+        ));
+        // No ankle limit: the foot is so light that the stiff limit damper makes RK4 blow up
+        // at this time step. Its controller keeps it in range instead.
+    }
+    let mut r = Robot::new(links);
+    r.q[1] = WALKER_LEG + 0.005;
+    r.qd[0] = 0.4;
+    r.ground = true;
+    r.controller = Some(walk);
+    r
+}
+
+/// Hip to sole when standing straight.
+const WALKER_LEG: f64 = 0.44 + 0.42 + 0.075;
+
+/// SIMBICON (Yin, Loken and van de Panne, 2007). A four-phase cycle: swing one leg forward
+/// for a fixed time, then hold until its foot lands, then swap legs. Every leg joint is a
+/// spring-damper toward a target angle. Balance comes from two rules:
+/// - the swing hip aims further forward the further and faster the body is ahead of the
+///   stance foot (stepping into a fall stops it, as people do);
+/// - the stance hip holds the torso upright in the world, taking whatever torque that needs.
+fn walk(r: &mut Robot) {
+    let [stance_side, phase_start, steps] = r.memory;
+    let side = stance_side as usize;
+    let (stance, swing) = ([3, 6][side], [6, 3][side]);
+    let frames = r.frames(&r.q);
+    let sole = |foot: usize| {
+        let (o, rot) = frames[foot];
+        let l = &r.links[foot];
+        (0..4)
+            .map(|k| {
+                o + rot
+                    * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1]))
+            })
+            .fold(f64::INFINITY, |low, p| low.min(p.y))
+    };
+    // Phase: swinging (first 0.3 s), then waiting for the swing foot to land.
+    let swinging = r.time - phase_start < WALK.swing_time;
+    if !swinging && sole(swing + 2) < 0.005 {
+        r.memory = [1.0 - stance_side, r.time, steps + 1.0];
+        return walk(r);
+    }
+    let total: f64 = r.links.iter().map(|l| l.mass).sum();
+    let (com, com_vel) = {
+        let vel = r.velocities(&frames, &r.qd);
+        r.links.iter().zip(&frames).zip(&vel).fold(
+            (Vec3::ZERO, Vec3::ZERO),
+            |(p, v), ((l, (o, rot)), (w, vo))| {
+                let rc = *rot * l.com;
+                (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
+            },
+        )
+    };
+    let (com, com_vel) = (com / total, com_vel / total);
+    let ankle = frames[stance + 2].0;
+    let target = if swinging {
+        WALK.swinging
+    } else {
+        WALK.landing
+    };
+    let pitch = r.q[2];
+    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
+    // Swing hip: aimed in the world frame, plus the balance feedback.
+    let aim =
+        target.swing_hip + WALK.distance_gain * (com.x - ankle.x) + WALK.speed_gain * com_vel.x;
+    let swing_hip = pd(pitch + r.q[swing], r.qd[2] + r.qd[swing], aim, 300.0);
+    let torso = pd(pitch, r.qd[2], WALK.lean, 600.0);
+    let mut torque = [0.0; 9];
+    torque[swing] = swing_hip;
+    torque[stance] = -torso - swing_hip;
+    torque[swing + 1] = pd(r.q[swing + 1], r.qd[swing + 1], target.swing_knee, 300.0);
+    torque[swing + 2] = pd(r.q[swing + 2], r.qd[swing + 2], target.swing_ankle, 30.0);
+    torque[stance + 1] = pd(r.q[stance + 1], r.qd[stance + 1], target.stance_knee, 300.0);
+    torque[stance + 2] = pd(r.q[stance + 2], r.qd[stance + 2], target.stance_ankle, 30.0);
+    for i in 3..9 {
+        r.ctrl[i] = torque[i] / r.links[i].gear;
+    }
+    r.target = Some(Vec3::new(com.x, 0.02, 0.0)); // drawn under the centre of mass
+}
+
+/// Target joint angles (rad) for one phase. Hip angles are of the thigh from vertical,
+/// positive forward; knees bend negative; ankles positive lift the toe.
+#[derive(Clone, Copy)]
+struct Pose {
+    swing_hip: f64,
+    swing_knee: f64,
+    swing_ankle: f64,
+    stance_knee: f64,
+    stance_ankle: f64,
+}
+
+struct Gait {
+    swing_time: f64,
+    swinging: Pose,
+    landing: Pose,
+    distance_gain: f64,
+    speed_gain: f64,
+    /// Torso angle from vertical (rad), positive leaning back.
+    lean: f64,
+}
+
+/// The SIMBICON paper's walk, retuned for this body: a longer swing, a 3° forward lean
+/// and half the speed feedback give 1.2 m/s at 1.9 steps per second, as people walk.
+const WALK: Gait = Gait {
+    swing_time: 0.5,
+    swinging: Pose {
+        swing_hip: 0.5,
+        swing_knee: -1.1,
+        swing_ankle: 0.6,
+        stance_knee: -0.05,
+        stance_ankle: 0.0,
+    },
+    landing: Pose {
+        swing_hip: -0.1,
+        swing_knee: -0.05,
+        swing_ankle: 0.15,
+        stance_knee: -0.1,
+        stance_ankle: 0.0,
+    },
+    distance_gain: 0.5,
+    speed_gain: 0.1,
+    lean: -0.05,
+};
+
 /// Demo robots, in the order of the web page's robot scenes.
 pub fn demo(id: u32) -> Robot {
     match id {
         0 => cart_pole(),
         1 => arm(),
         2 => double_pendulum(),
-        _ => hopper(),
+        3 => hopper(),
+        _ => walker(),
     }
 }
 
