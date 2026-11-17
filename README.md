@@ -7,6 +7,9 @@ not a port of it (see "What this is not").
 
 ## Run the demo
 
+Live: https://aabhimittal.github.io/Physics-simulator/ (deployed from `web/` by
+`.github/workflows/pages.yml` on every push to `main`). Or locally:
+
 ```sh
 python3 -m http.server -d web      # then open http://localhost:8000
 ```
