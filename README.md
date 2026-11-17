@@ -7,11 +7,15 @@ not a port of it (see "What this is not").
 
 ## Run the demo
 
+Live: https://aabhimittal.github.io/Physics-simulator/ (deployed from `web/` by
+`.github/workflows/pages.yml` on every push to `main`). Or locally:
+
 ```sh
 python3 -m http.server -d web      # then open http://localhost:8000
 ```
 
-A walking person and a car on a circular road. Six robot scenes: a one-legged hopper that balances by foot placement, the same
+A walking person, a car on a circular road, and the two together: the car stopping
+for the person crossing. Six robot scenes: a one-legged hopper that balances by foot placement, the same
 hopper run by a trained neural network, a cart-pole that swings its pole up and
 balances it, a cart-pole that learns to balance while you watch, a
 four-joint arm whose tip follows a moving target, and a motorless double
@@ -152,6 +156,16 @@ ideal v²/2μg = 39.3 m, 0-100 km/h in 8.4 s, and sideways acceleration v²/r on
 In the browser it drives itself; arrow keys or WASD take over. It shows load transfer,
 body roll, understeer at full lock, and power oversteer (a steady drift) under full
 throttle in a bend.
+
+### Crossing
+
+`scenes::crossing` puts the car and the walker together. They live in different
+simulators and do not collide; the car's autopilot is given the person's position and
+velocity, like a driver's eyes. Anyone on the road, or due on it within 3 s, makes it cap
+its speed at √(2·a·d), the most from which braking at a = 6 m/s² still stops it in the
+distance d left, aiming to stop with its nose 4 m short. It waits while they cross, then
+drives on; a new person steps off the kerb each time. `tests/vehicle.rs` runs a minute
+of it: several stops, never closer than 5.9 m centre to person.
 
 Limits: wheels only meet flat ground (no kerbs or ramps, and they pass through other
 bodies, though the car body itself collides); one gear; no anti-roll bars.
