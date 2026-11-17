@@ -136,13 +136,33 @@ smoother, more repeatable hops.
 
 ## Walking person
 
-`robot::walker` is a 70 kg planar body (torso, then thigh, shin and foot per leg) with
-hip, knee and ankle motors about as strong as human muscle. It is driven by SIMBICON
-(Yin, Loken and van de Panne, 2007): a four-phase cycle of PD targets, the stance hip
-holding the torso upright, and foot placement that steps further ahead the faster and
-further the body is ahead of the stance foot. Retuned for this body it walks at
-1.2 m/s, 1.9 steps per second and 0.6 m a step, inside the human range, and recovers
-from 250 N shoves either way (a forward shove makes it lunge, hips down to 0.67 m).
+`robot::walker` is a 70 kg planar body: torso, thigh, shin and foot per leg, and an upper
+arm and forearm per side, with motors about as strong as human muscle. It is driven by
+SIMBICON (Yin, Loken and van de Panne, 2007): a phase cycle of spring-damper targets, the
+stance hip holding the torso upright, and foot placement that steps further ahead the
+faster and further the body is ahead of the stance foot. On top of that, to look less
+like a robot:
+
+- **Push-off**: while the trailing foot is still down the calf points the toe and drives
+  the body on; it eases off when walking faster than the 1.6 m/s it aims for.
+- **Stiff stance knee and ankle**, so the body walks tall instead of crouching (the
+  original crouched to 48° of knee bend; now about 10°).
+- **Reaching for the ground when the body says so**: the swing leg extends for landing
+  after its swing time *or* once the stance leg is 0.25 rad behind the body. With time
+  alone, a slightly fast body fell past its stance foot and stumbled every few steps.
+- **Smooth targets** (blended over 0.1 s, as muscles ramp) and **swinging arms**, which
+  are real links whose mass the balance has to carry.
+
+It walks briskly: 1.6 m/s, 1.75 steps a second, 0.9 m steps varying by under 10%, heel
+first, and survives shoves up to 250 N either way at any point of the stride (36 of 36
+in a sweep). It is not fully human: it moves in a plane (no hip sway or pelvis twist),
+pushes off to about -5° where people reach -16°, and keeps its stance knee straighter
+(10° against 15-20°). `tests/robot.rs` has an opt-in random-search tuner
+(`cargo test --release --test robot tune_walk -- --ignored --nocapture`); it scores only
+two shoves, so check what it finds against more before adopting it.
+
+In the browser the links are drawn as a person (tapered limbs, head, hands, shoes,
+clothes); the physics underneath is the same set of boxes.
 
 ## Car
 
@@ -153,7 +173,9 @@ differential, 90 kW, front-biased brakes with ABS, Ackermann steering, aero drag
 rolling resistance. Each wheel's spin is stepped implicitly, since the tyre makes it stiff.
 `tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.1 m against the
 ideal v²/2μg = 39.3 m, 0-100 km/h in 8.4 s, and sideways acceleration v²/r on its circle.
-In the browser it drives itself; arrow keys or WASD take over. It shows load transfer,
+In the browser it drives itself; arrow keys or WASD take over. It is drawn with a cabin,
+headlights and tail lights that light up with the simulated brake pedal; the road has a
+dashed centre line and, in the crossing scene, a zebra crossing. It shows load transfer,
 body roll, understeer at full lock, and power oversteer (a steady drift) under full
 throttle in a bend.
 

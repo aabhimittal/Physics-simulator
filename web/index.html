@@ -120,11 +120,9 @@ const SCENES = [
 // Scenes added later, out of order: ids must match src/scenes.rs and src/ffi.rs.
 SCENES[12] = { name: 'Car', car: true, follow: 0, group: 1, view: [-0.5, 1.15, 14, [0, 0.6, 30]],
   note: 'A 1200 kg car on four springs. Each tyre grips according to how much it slips, so in the bends the body rolls, the outer tyres carry most of the weight, and the front tyres point a few degrees inside the way the car goes. It speeds up and brakes every 8 s. Drive it yourself with the arrow keys or WASD, into the crates if you like.' };
-SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 2, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
+SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 2, person: 1, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
   note: 'A 70 kg body with hip, knee and ankle motors about as strong as human muscle, and no animation: every step is physics. It balances the way people do, by stepping further ahead when it starts to fall forward. A small tug on the torso makes it stumble and recover; yank it and it falls (Reset stands it up again).' };
-SCENES[14] = { name: 'Crossing', robot: true, crossing: true, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
-  // Car body, then (after its wheels) the person: torso and the two legs in their own colours.
-  palette: i => i === 1 ? 0 : i < 12 ? (i === 8 ? 2 : 1) : i < 15 ? 3 : 2,
+SCENES[14] = { name: 'Crossing', robot: true, crossing: true, person: 6, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
   note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs.' };
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
@@ -159,6 +157,97 @@ road.position.y = 0.004;
 road.receiveShadow = true;
 scene.add(floor, rods, road);
 
+// Road markings: a dashed centre line round the circle, and a zebra crossing where the
+// person's path (the x axis) crosses the road. Stripes run along the traffic, as on real roads.
+const paint = new THREE.MeshLambertMaterial({ color: 0xf2f2ee, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+const markings = new THREE.Group(), zebra = new THREE.Group();
+for (let k = 0; k < 64; k++) {
+  const a = (k / 64) * Math.PI * 2, dash = new THREE.Mesh(new THREE.PlaneGeometry(0.15, 1.4), paint);
+  dash.rotation.set(-Math.PI / 2, 0, -a);
+  dash.position.set(30 * Math.cos(a), 0.006, 30 * Math.sin(a));
+  markings.add(dash);
+}
+for (let x = 27; x <= 33; x += 1) {
+  const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 3), paint);
+  stripe.rotation.x = -Math.PI / 2;
+  stripe.position.set(x, 0.007, 0);
+  zebra.add(stripe);
+}
+markings.traverse(o => { o.receiveShadow = true; });
+zebra.traverse(o => { o.receiveShadow = true; });
+scene.add(markings, zebra);
+let tailLights = null;
+
+// The walking person drawn as a person: rounded, tapered limbs in clothes, over the same
+// links the physics moves (link order from robot::walker). Shapes are drawing only.
+const SKIN = 0xc8906b, SHIRT = 0x2f6fd0, TROUSERS = 0x323d4c, SHOE = 0x1d2127;
+const coat = c => new THREE.MeshStandardMaterial({ color: new THREE.Color(c).convertSRGBToLinear(), roughness: 0.75 });
+// A limb: a cone-like cylinder from radius r1 (top) to r2 (bottom) over length len, with round ends.
+function limb(len, r1, r2, material) {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, len, 18), material));
+  const top = new THREE.Mesh(new THREE.SphereGeometry(r1, 18, 12), material);
+  const bottom = new THREE.Mesh(new THREE.SphereGeometry(r2, 18, 12), material);
+  top.position.y = len / 2;
+  bottom.position.y = -len / 2;
+  g.add(top, bottom);
+  return g;
+}
+function blob(rx, ry, rz, material, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), material);
+  m.scale.set(rx, ry, rz);
+  m.position.set(x, y, z);
+  return m;
+}
+// Each part is centred on its link's centre of mass, x forward, y up the limb, z sideways.
+function bodyPart(link) {
+  const g = new THREE.Group();
+  const [skin, shirt, trousers, shoe] = [SKIN, SHIRT, TROUSERS, SHOE].map(coat);
+  switch (link) {
+    case 2: { // torso, from the hips up, with the head
+      const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.15, 0.5, 24), shirt);
+      chest.scale.x = 0.62;
+      chest.position.y = 0.04;
+      g.add(chest, blob(0.11, 0.07, 0.19, shirt, 0, 0.29), blob(0.12, 0.12, 0.17, trousers, 0, -0.27));
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.1, 12), skin);
+      neck.position.y = 0.36;
+      g.add(neck, blob(0.095, 0.115, 0.085, skin, 0.01, 0.47), blob(0.1, 0.06, 0.09, new THREE.MeshStandardMaterial({ color: 0x2b211c, roughness: 0.9 }), -0.01, 0.53));
+      break;
+    }
+    case 3: case 6: g.add(limb(0.38, 0.075, 0.055, trousers)); break; // thigh
+    case 4: case 7: g.add(limb(0.38, 0.055, 0.042, trousers)); break; // shin
+    case 5: case 8: g.add(blob(0.13, 0.045, 0.05, shoe, 0.0, -0.005)); break; // shoe, heel to toe
+    case 9: case 11: g.add(limb(0.22, 0.048, 0.04, shirt)); break; // upper arm
+    case 10: case 12: g.add(limb(0.22, 0.038, 0.03, skin), blob(0.035, 0.05, 0.03, skin, 0, -0.16)); break; // forearm and hand
+    default: g.visible = false; // the free base joints and the centre-of-mass marker
+  }
+  return g;
+}
+
+// The car body gets a cabin with dark windows, headlights and tail lights (drawing only).
+function dressCar(body, b) {
+  const [hx, hy, hz] = [b[8], b[9], b[10]];
+  const glass = new THREE.MeshStandardMaterial({ color: 0x1b2633, roughness: 0.2, metalness: 0.3 });
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(hx * 1.0, hy * 1.2, hz * 1.7), glass);
+  cabin.position.set(-hx * 0.15, hy + hy * 0.6, 0);
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(hx * 0.8, 0.05, hz * 1.75), body.material);
+  roof.position.set(-hx * 0.2, hy + hy * 1.2 + 0.025, 0);
+  body.add(cabin, roof);
+  const lamp = (x, z, color, emissive) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.12, 0.3), new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: 0.6 }));
+    m.position.set(x, hy * 0.35, z);
+    body.add(m);
+    return m.material;
+  };
+  for (const z of [hz * 0.62, -hz * 0.62]) lamp(hx + 0.02, z, 0xfff6d8, 0xfff2c0);
+  tailLights = lamp(-hx - 0.02, hz * 0.62, 0x7a0d0d, 0xff2a1a);
+  for (const m of body.children) if (m.isMesh) m.castShadow = true;
+  // Both tail lights share one material, so one brightness drives the pair.
+  const right = body.children[body.children.length - 1].clone();
+  right.position.z = -hz * 0.62;
+  body.add(right);
+}
+
 let wasm, current = 0, meshes = [], colors, startEnergy = null;
 let paused = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const orbit = { theta: 0, phi: 1, dist: 10, target: new THREE.Vector3() };
@@ -166,7 +255,7 @@ const orbit = { theta: 0, phi: 1, dist: 10, target: new THREE.Vector3() };
 function clearBodies() {
   for (const m of meshes) {
     scene.remove(m);
-    m.geometry.dispose();
+    m.traverse(o => o.geometry?.dispose());
   }
   meshes = [];
 }
@@ -215,7 +304,9 @@ function loadScene(id) {
   $('note').textContent = SCENES[id].note;
   [...$('scenes').children].forEach(b => b.setAttribute('aria-pressed', +b.dataset.id === id));
   $('fire').hidden = !!SCENES[id].robot; // robots have no contact yet
-  road.visible = !!(SCENES[id].car || SCENES[id].crossing);
+  road.visible = markings.visible = !!(SCENES[id].car || SCENES[id].crossing);
+  zebra.visible = !!SCENES[id].crossing;
+  tailLights = null;
   const watching = SCENES[id].learning || SCENES[id].trained; // these robots cannot be dragged
   $('hint').textContent = (watching ? 'Drag' : 'Drag an object to pull it around. Drag empty space') + ' to look around, scroll to zoom'
     + (SCENES[id].robot ? '.' : ', double-click to fire a ball at that spot.')
@@ -230,24 +321,33 @@ function sync() {
   for (let i = 1; i < n; i++) { // body 0 is the ground
     const b = s.subarray(3 + i * 11, 14 + i * 11);
     let mesh = meshes[i - 1];
+    const { person, car, crossing } = SCENES[current];
+    if (!mesh && person !== undefined && i >= person) {
+      mesh = bodyPart(i - person, b);
+      mesh.traverse(o => { o.castShadow = o.receiveShadow = true; o.userData.body = i; });
+      scene.add(mesh);
+      meshes.push(mesh);
+    }
     if (!mesh) {
       const [box, wheel] = [b[7] === 2, b[7] === 3];
       // A wheel's 14 flat sides are outlined, so you can see it turn (and see it skid when it doesn't).
       const shape = box ? new THREE.BoxGeometry(2 * b[8], 2 * b[9], 2 * b[10])
         : wheel ? new THREE.CylinderGeometry(b[8], b[8], 2 * b[9], 14)
         : new THREE.SphereGeometry(b[8], 32, 16);
-      const { palette, group } = SCENES[current];
-      const color = wheel ? colors.ink : colors.bodies[(palette ? palette(i) : Math.floor((i - 1) / group)) % 4];
+      const color = wheel ? colors.ink : colors.bodies[Math.floor((i - 1) / SCENES[current].group) % 4];
       mesh = new THREE.Mesh(shape, new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
       mesh.castShadow = mesh.receiveShadow = true;
       mesh.userData.body = wheel ? null : i; // wheels are drawn only; grab the car by its body
       if (box || wheel) mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(shape), new THREE.LineBasicMaterial({ color: colors.ink })));
+      if (i === 1 && (car || crossing)) dressCar(mesh, b);
       scene.add(mesh);
       meshes.push(mesh);
     }
     mesh.position.set(b[0], b[1], b[2]);
     mesh.quaternion.set(b[3], b[4], b[5], b[6]);
   }
+  // Tail lights glow with the simulated brake pedal.
+  if (tailLights) tailLights.emissiveIntensity = 0.15 + 2.5 * wasm.car(6);
   rods.geometry.setAttribute('position', new THREE.BufferAttribute(s.slice(3 + n * 11), 3));
   startEnergy ??= energy;
   const share = startEnergy > 1e-6 ? ` · ${(100 * energy / startEnergy).toFixed(1)}% of start` : '';
@@ -283,7 +383,7 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId);
   [lastX, lastY] = [e.clientX, e.clientY];
   aim(e.clientX, e.clientY);
-  const hit = ray.intersectObjects(meshes).find(h => h.object.userData.body != null);
+  const hit = ray.intersectObjects(meshes, true).find(h => h.object.userData.body != null);
   mode = hit ? 'grab' : 'orbit';
   if (hit) {
     // Drag in the plane that faces the camera and passes through the grabbed point.
