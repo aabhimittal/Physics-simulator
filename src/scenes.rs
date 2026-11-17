@@ -1,5 +1,6 @@
 //! Demo scenes. Ids match the buttons in `web/index.html`.
 
+use crate::vehicle::Car;
 use crate::{Body, Joint, Quat, Shape, Vec3, World};
 
 /// Hangs a sphere on a rigid massless rod of length `len` from local point `lb`
@@ -108,9 +109,35 @@ pub fn load(id: u32) -> World {
                 }
             }
         }
+        // A car driving itself round a 30 m circle, past a stack of crates to drive into.
+        CAR_SCENE => {
+            let mut body = Body::new(
+                Shape::Box(Vec3::new(2.1, 0.35, 0.7)),
+                1200.0 / (8.0 * 2.1 * 0.35 * 0.7),
+                Vec3::new(0.0, Car::RIDE_HEIGHT, 30.0),
+            );
+            body.vel = Vec3::X * 8.0;
+            let body = w.add(body);
+            let mut car = Car::new(body);
+            car.autopilot = Some(30.0);
+            for w_ in &mut car.wheels {
+                w_.spin = 8.0 / Car::WHEEL_SIZE.0;
+            }
+            w.cars.push(car);
+            for layer in 0..3 {
+                for i in 0..3 - layer {
+                    let x = (i as f64 - (2 - layer) as f64 / 2.0) * 0.82;
+                    w.add(Body::new(
+                        Shape::Box(Vec3::splat(0.4)),
+                        60.0,
+                        Vec3::new(x, 0.4 + layer as f64 * 0.8, 0.0),
+                    ));
+                }
+            }
+        }
         // Tennis racket theorem, in zero gravity: spin about the smallest and largest
         // inertia axes is stable, spin about the middle one flips over and over.
-        _ => {
+        4 => {
             w.gravity = Vec3::ZERO;
             for k in 0..3 {
                 let mut b = Body::new(
@@ -123,6 +150,10 @@ pub fn load(id: u32) -> World {
                 w.add(b);
             }
         }
+        _ => {} // robot scenes: an empty world
     }
     w
 }
+
+/// The car scene's id, after the robot scenes; see `web/index.html`.
+pub const CAR_SCENE: u32 = 12;

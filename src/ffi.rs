@@ -2,6 +2,7 @@
 
 use crate::env::{Learner, Player, Task};
 use crate::robot::{self, Pull, Robot};
+use crate::vehicle::Car;
 use crate::{Body, Joint, Quat, Shape, Vec3, World, scenes};
 use std::cell::RefCell;
 
@@ -11,6 +12,8 @@ const FIRST_ROBOT_SCENE: u32 = 6;
 const LEARNING_SCENE: u32 = 10;
 /// The hopper driven by the trained policy (`env::Player`).
 const TRAINED_SCENE: u32 = 11;
+/// The walking person, `robot::demo(7)`. Scene 12 is the car (`scenes::CAR_SCENE`).
+const WALK_SCENE: u32 = 13;
 
 struct State {
     world: World,
@@ -38,16 +41,9 @@ pub extern "C" fn load(scene: u32) {
     with(|s| {
         s.learner = (scene == LEARNING_SCENE).then(|| Learner::new(Task::Balance, 1));
         s.player = (scene == TRAINED_SCENE).then(|| Player::new(1));
-        s.robot = if s.learner.is_some() || s.player.is_some() {
-            None
-        } else {
-            scene.checked_sub(FIRST_ROBOT_SCENE).map(robot::demo)
-        };
-        s.world = if scene >= FIRST_ROBOT_SCENE {
-            World::default()
-        } else {
-            scenes::load(scene)
-        };
+        s.robot = ((FIRST_ROBOT_SCENE..LEARNING_SCENE).contains(&scene) || scene == WALK_SCENE)
+            .then(|| robot::demo(scene - FIRST_ROBOT_SCENE));
+        s.world = scenes::load(scene); // empty in the robot scenes
         s.grabbed = None;
     })
 }
@@ -65,14 +61,33 @@ pub extern "C" fn step(dt: f64) {
 }
 
 /// Returns a pointer to `[bodies, joints, energy]`, then per body
-/// `[pos xyz, quat xyzw, shape (0 plane, 1 sphere, 2 box), size xyz]`,
-/// then per joint the two anchor positions.
+/// `[pos xyz, quat xyzw, shape (0 plane, 1 sphere, 2 box, 3 wheel), size xyz]`,
+/// then per joint the two anchor positions. Wheels are drawn only (they are not bodies):
+/// size is (radius, half width, radius) and the axle is the local y axis.
 #[unsafe(no_mangle)]
 pub extern "C" fn state() -> *const f32 {
     with(|s| {
         let w = &s.world;
         // What to draw: the world's bodies, or the ground plus the robot's links and its target.
-        let mut draw: Vec<_> = w.bodies.iter().map(|b| (b.pos, b.rot, b.shape)).collect();
+        let drawn = |(pos, rot, shape): (Vec3, Quat, Shape)| match shape {
+            Shape::Plane => (pos, rot, 0.0, Vec3::ZERO),
+            Shape::Sphere(r) => (pos, rot, 1.0, Vec3::splat(r)),
+            Shape::Box(h) => (pos, rot, 2.0, h),
+        };
+        let mut draw: Vec<_> = w
+            .bodies
+            .iter()
+            .map(|b| drawn((b.pos, b.rot, b.shape)))
+            .collect();
+        let (radius, half_width) = Car::WHEEL_SIZE;
+        for car in &w.cars {
+            let wheels = car.wheel_poses(&w.bodies[car.body]);
+            draw.extend(
+                wheels
+                    .into_iter()
+                    .map(|(p, q)| (p, q, 3.0, Vec3::new(radius, half_width, radius))),
+            );
+        }
         let robot = s
             .learner
             .as_ref()
@@ -85,18 +100,13 @@ pub extern "C" fn state() -> *const f32 {
             if let Some(t) = r.target {
                 boxes.insert(r.links.len(), (t, Quat::IDENTITY, Shape::Sphere(0.04)));
             }
-            draw.extend(boxes);
+            draw.extend(boxes.into_iter().map(drawn));
         }
         let energy = robot.map_or_else(|| w.energy(), Robot::energy);
         s.out.clear();
         s.out
             .extend([draw.len() as f32, w.joints.len() as f32, energy as f32]);
-        for (pos, rot, shape) in draw {
-            let (kind, size) = match shape {
-                Shape::Plane => (0.0, Vec3::ZERO),
-                Shape::Sphere(r) => (1.0, Vec3::splat(r)),
-                Shape::Box(h) => (2.0, h),
-            };
+        for (pos, rot, kind, size) in draw {
             let (p, q, size) = (pos.as_vec3(), rot.as_quat(), size.as_vec3());
             s.out.extend([
                 p.x, p.y, p.z, q.x, q.y, q.z, q.w, kind, size.x, size.y, size.z,
@@ -211,6 +221,58 @@ pub extern "C" fn player(field: u32) -> f64 {
             0 => p.episode as f64,
             1 => p.seconds,
             _ => p.env.robot.q[0],
+        })
+    })
+}
+
+/// Car scene: keyboard driving. `throttle` and `steer` in [-1, 1]; the autopilot turns off.
+#[unsafe(no_mangle)]
+pub extern "C" fn drive(throttle: f64, steer: f64) {
+    with(|s| {
+        if let Some(car) = s.world.cars.first_mut() {
+            car.drive(&s.world.bodies[car.body], throttle, steer);
+        }
+    })
+}
+
+/// Car scene readout: `[speed km/h, sideways acceleration in g, body roll in degrees,
+/// front tyre slip angle in degrees, 1 if on autopilot]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn car(field: u32) -> f64 {
+    with(|s| {
+        let Some(car) = s.world.cars.first() else {
+            return 0.0;
+        };
+        let b = &s.world.bodies[car.body];
+        let sideways = (b.rot * Vec3::Z).with_y(0.0).normalize_or_zero();
+        match field {
+            0 => b.vel.length() * 3.6,
+            1 => car.accel.dot(sideways).abs() / 9.81,
+            2 => car.roll(b).to_degrees().abs(),
+            3 => {
+                car.wheels[..2]
+                    .iter()
+                    .map(|w| w.slip.1.abs())
+                    .sum::<f64>()
+                    .to_degrees()
+                    / 2.0
+            }
+            _ => car.autopilot.is_some() as u8 as f64,
+        }
+    })
+}
+
+/// Walking scene readout: `[average speed m/s, steps taken, steps per second]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn walker(field: u32) -> f64 {
+    with(|s| {
+        s.robot.as_ref().map_or(0.0, |r| {
+            let time = r.time.max(1.0);
+            match field {
+                0 => r.q[0] / time,
+                1 => r.memory[2],
+                _ => r.memory[2] / time,
+            }
         })
     })
 }

@@ -15,6 +15,7 @@ pub mod env;
 mod ffi;
 pub mod robot;
 pub mod scenes;
+pub mod vehicle;
 
 use collide::Contact;
 
@@ -165,6 +166,8 @@ pub struct World {
     /// `bodies[0]` is always the static ground plane.
     pub bodies: Vec<Body>,
     pub joints: Vec<Joint>,
+    /// Cars driving on the ground; each one's body is in `bodies`.
+    pub cars: Vec<vehicle::Car>,
     pub gravity: Vec3,
     pub substeps: u32,
     pub restitution: f64,
@@ -177,6 +180,7 @@ impl Default for World {
         World {
             bodies: vec![Body::new(Shape::Plane, 0.0, Vec3::ZERO)],
             joints: Vec::new(),
+            cars: Vec::new(),
             gravity: Vec3::new(0.0, -9.81, 0.0),
             substeps: 20,
             restitution: 0.2,
@@ -261,6 +265,9 @@ impl World {
     pub fn step(&mut self, dt: f64) {
         let h = dt / self.substeps as f64;
         for _ in 0..self.substeps {
+            for car in &mut self.cars {
+                car.update(&mut self.bodies[car.body], h);
+            }
             self.integrate(h);
             self.find_contacts();
             self.solve_joints(h);

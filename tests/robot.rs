@@ -218,3 +218,69 @@ fn motor_force_falls_to_zero_at_its_free_speed() {
     run(&mut r, 2.0);
     close(r.qd[0], 2.0, 1e-6);
 }
+
+#[test]
+fn walker_walks_at_human_speed_and_cadence() {
+    let mut r = robot::walker();
+    for _ in 0..(15.0 / DT) as usize {
+        r.step(DT, 16);
+        assert!(
+            r.q[1] > 0.7 && r.q[2].abs() < 0.5,
+            "fell at t = {:.1}: hip height {}, torso pitch {}",
+            r.time,
+            r.q[1],
+            r.q[2]
+        );
+    }
+    // People walk at about 1.2 to 1.4 m/s, 1.8 to 2 steps per second, 0.6 to 0.75 m a step.
+    let (speed, cadence) = (r.q[0] / r.time, r.memory[2] / r.time);
+    let stride = r.q[0] / r.memory[2];
+    println!("{speed:.2} m/s, {cadence:.2} steps/s, {stride:.2} m a step");
+    assert!((1.0..1.5).contains(&speed), "{speed:.2} m/s");
+    assert!((1.6..2.2).contains(&cadence), "{cadence:.2} steps/s");
+    assert!((0.5..0.8).contains(&stride), "{stride:.2} m a step");
+}
+
+#[test]
+fn walker_recovers_from_shoves_both_ways() {
+    for shove in [0.06, -0.06] {
+        let mut r = robot::walker();
+        for frame in 0..(12.0 / DT) as usize {
+            // About 250 N on the chest for 0.2 s, 5 s in.
+            r.pull = (300..312).contains(&frame).then(|| Pull {
+                link: 2,
+                local: dvec3(0.0, 0.3, 0.0),
+                target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
+            });
+            r.step(DT, 16);
+            // A forward shove makes it lunge, hips down to about 0.67 m, then recover; below
+            // 0.55 m it would be collapsing.
+            assert!(
+                r.q[1] > 0.55 && r.q[2].abs() < 0.6,
+                "shove {shove}: fell at t = {:.1}",
+                r.time
+            );
+        }
+        assert!(
+            r.qd[0] > 0.3 || r.q[0] > 8.0,
+            "shove {shove}: stopped walking forward"
+        );
+    }
+}
+
+#[test]
+fn knocked_down_walker_comes_to_rest() {
+    // A hard shove knocks it over. The fallen body must stop, not slide off faster and
+    // faster (stiff joint dampers on the light feet once made it gain momentum from nowhere).
+    let mut r = robot::walker();
+    for frame in 0..(12.0 / DT) as usize {
+        r.pull = (240..249).contains(&frame).then(|| Pull {
+            link: 2,
+            local: dvec3(0.0, 0.3, 0.0),
+            target: dvec3(r.q[0] + 1.0, r.q[1] + 0.3, 0.0),
+        });
+        r.step(DT, 16);
+    }
+    assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
+    assert!(r.qd[0].abs() < 0.2, "still sliding at {} m/s", r.qd[0]);
+}
