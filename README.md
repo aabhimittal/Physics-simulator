@@ -116,10 +116,19 @@ second. Seeds 1 to 3 also learn to hop, at 46 to 50 m in 10 s. Seed 2's policy f
 on 1 of the 100 test starts, which the 10 evaluation episodes during training did
 not show, so run the test before trusting a new policy.
 
-Before the motors had a torque-speed limit, the same training produced a policy
-that drove the leg at 21 m/s with 8.7 kW peaks, which no 11.5 kg robot could do.
-The limit caps that at 5 m/s and 560 W. It lowers the top speed only a little
-(5.6 m/s before), because running speed depends more on leg force than on motor power.
+The same training with and without the limit, seeds 0 to 3, each policy run
+from 100 starts:
+
+| | Peak leg speed | Peak leg power | Median speed | Runs that fell |
+|---|---|---|---|---|
+| No limit | 21 to 31 m/s | 8.7 to 13.9 kW | 4.1 to 5.6 m/s | 37 of 400 |
+| Limit | 5.0 to 5.1 m/s | 560 W | 4.4 to 5.0 m/s | 1 of 400 |
+
+Without the limit every seed drove the leg at speeds and powers no 11.5 kg robot
+could reach. The limit barely changes how fast the hopper travels, because that
+depends more on leg force than on motor power. The limited policies also fall
+far less often, perhaps because a motor that weakens as it speeds up gives
+smoother, more repeatable hops.
 
 ## How the rigid-body engine works
 
