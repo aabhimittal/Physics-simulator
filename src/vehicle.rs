@@ -44,6 +44,8 @@ const DRAG: f64 = 0.5 * 1.2 * 0.65;
 /// Below this speed (m/s) slip is measured against it instead, so slip stays finite at standstill.
 const SLOW: f64 = 1.0;
 pub const WHEELBASE: f64 = 2.7;
+/// Firm but ordinary braking (0.6 g) when stopping for someone; the tyres can give about 1 g.
+const YIELD_DECELERATION: f64 = 6.0;
 pub const MAX_STEER: f64 = 0.6;
 
 /// Pacejka's Magic Formula with E = 0: stiffness B, shape C, peak D.
@@ -77,6 +79,10 @@ pub struct Car {
     pub steer: f64,
     /// When set, the car drives itself round a circle of this radius about the origin.
     pub autopilot: Option<f64>,
+    /// Where a person on foot is and how fast they are moving, if the autopilot should watch
+    /// for one; and whether it is slowing down for them right now.
+    pub pedestrian: Option<(Vec3, Vec3)>,
+    pub yielding: bool,
     pub time: f64,
     /// Acceleration of the body (m/s²), for display.
     pub accel: Vec3,
@@ -109,6 +115,8 @@ impl Car {
             brake: 0.0,
             steer: 0.0,
             autopilot: None,
+            pedestrian: None,
+            yielding: false,
             time: 0.0,
             accel: Vec3::ZERO,
             last_vel: Vec3::ZERO,
@@ -215,11 +223,26 @@ impl Car {
         let local = b.rot.inverse() * (target - b.pos);
         let curvature = -2.0 * local.z / local.length_squared();
         self.steer = (WHEELBASE * curvature).atan().clamp(-MAX_STEER, MAX_STEER);
-        let wanted = if (self.time / 8.0) as u64 % 2 == 0 {
+        let mut wanted: f64 = if (self.time / 8.0) as u64 % 2 == 0 {
             15.0
         } else {
             8.0
         };
+        // Yield to a person ahead who is on the road (7 m wide) or will be within 3 s, as a
+        // driver watches someone stepping off the kerb. From speed v a car braking at a stops in
+        // v²/2a, so the fastest it may go with d metres left is √(2·a·d). Aim to stop with its
+        // centre 6 m short, the nose about 4 m from them.
+        self.yielding = false;
+        if let Some((p, v)) = self.pedestrian {
+            let on_road = |at: Vec3| (at.x.hypot(at.z) - radius).abs() < 3.5;
+            let in_the_way = (0..=3).any(|s| on_road(p + v * s as f64));
+            let gap = (b.pos.z.atan2(b.pos.x) - p.z.atan2(p.x)).rem_euclid(std::f64::consts::TAU)
+                * radius;
+            if in_the_way && gap < 50.0 {
+                self.yielding = true;
+                wanted = wanted.min((2.0 * YIELD_DECELERATION * (gap - 6.0).max(0.0)).sqrt());
+            }
+        }
         let forward = b.vel.dot(b.rot * Vec3::X);
         let push = (0.5 * (wanted - forward)).clamp(-1.0, 1.0);
         (self.throttle, self.brake) = (push.max(0.0), (-push).max(0.0));

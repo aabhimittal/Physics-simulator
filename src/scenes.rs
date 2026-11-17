@@ -1,5 +1,6 @@
 //! Demo scenes. Ids match the buttons in `web/index.html`.
 
+use crate::robot::{self, Robot};
 use crate::vehicle::Car;
 use crate::{Body, Joint, Quat, Shape, Vec3, World};
 
@@ -157,3 +158,35 @@ pub fn load(id: u32) -> World {
 
 /// The car scene's id, after the robot scenes; see `web/index.html`.
 pub const CAR_SCENE: u32 = 12;
+
+/// The scene where a person walks across the car's road; see `crossing`.
+pub const CROSSING_SCENE: u32 = 14;
+/// Where people step out: their straight path along the x axis crosses the road (radius
+/// 30 m, 7 m wide) between x = 26.5 and 33.5, 2 m after this point.
+const KERB: f64 = 24.5;
+
+/// The car scene without the crates, plus a walker about to cross the road. The two live in
+/// different simulators (rigid bodies and joint coordinates) and do not collide; the car
+/// sees the person through its autopilot and stops for them.
+pub fn crossing() -> (World, Robot) {
+    let mut w = load(CAR_SCENE);
+    w.bodies.truncate(2); // ground and car
+    (w, walker_at_kerb())
+}
+
+fn walker_at_kerb() -> Robot {
+    let mut r = robot::walker();
+    r.q[0] = KERB;
+    r
+}
+
+/// Advances the crossing scene one frame. Once across, the person is replaced by a new one
+/// at the kerb, so someone is always about to cross.
+pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
+    w.cars[0].pedestrian = Some((Vec3::X * walker.q[0], Vec3::X * walker.qd[0]));
+    walker.step(dt, 16);
+    w.step(dt);
+    if walker.q[0] > KERB + 13.0 {
+        *walker = walker_at_kerb();
+    }
+}

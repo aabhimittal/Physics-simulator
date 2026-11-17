@@ -110,3 +110,39 @@ fn autopilot_corners_on_its_circle_with_the_right_sideways_acceleration() {
         }
     }
 }
+
+#[test]
+fn car_stops_for_people_crossing_and_drives_on() {
+    let (mut w, mut walker) = scenes::crossing();
+    let (mut closest, mut stopped, mut driven, mut crossed) = (f64::INFINITY, 0, 0.0, 0);
+    let mut was_stopped = false;
+    for _ in 0..(60.0 / DT) as usize {
+        let before = walker.q[0];
+        scenes::step_crossing(&mut w, &mut walker, DT);
+        crossed += (walker.q[0] < before - 5.0) as u32; // replaced at the kerb
+        let (car, b) = (&w.cars[0], &w.bodies[1]);
+        let person = Vec3::new(walker.q[0], 0.0, 0.0);
+        if ((person.x.hypot(person.z)) - 30.0).abs() < 3.5 {
+            closest = closest.min(b.pos.with_y(0.0).distance(person));
+        }
+        let stopped_now = car.yielding && b.vel.length() < 0.5;
+        stopped += (stopped_now && !was_stopped) as u32;
+        was_stopped = stopped_now;
+        driven += b.vel.length() * DT;
+        assert!(walker.q[1] > 0.7, "the person fell at t = {:.1}", car.time);
+    }
+    println!(
+        "closest {closest:.1} m (car centre to person on the road), stopped {stopped} times, drove {driven:.0} m, {crossed} people crossed"
+    );
+    // The car's nose is 2.1 m ahead of its centre: at least 1.5 m clear at the closest.
+    assert!(
+        closest > 3.6,
+        "car centre came within {closest:.1} m of the person on the road"
+    );
+    assert!(stopped >= 2, "stopped for people only {stopped} times");
+    assert!(crossed >= 3, "only {crossed} people got across");
+    assert!(
+        driven > 250.0,
+        "the car only drove {driven:.0} m in a minute"
+    );
+}

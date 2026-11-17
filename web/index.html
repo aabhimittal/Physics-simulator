@@ -122,6 +122,10 @@ SCENES[12] = { name: 'Car', car: true, follow: 0, group: 1, view: [-0.5, 1.15, 1
   note: 'A 1200 kg car on four springs. Each tyre grips according to how much it slips, so in the bends the body rolls, the outer tyres carry most of the weight, and the front tyres point a few degrees inside the way the car goes. It speeds up and brakes every 8 s. Drive it yourself with the arrow keys or WASD, into the crates if you like.' };
 SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 2, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
   note: 'A 70 kg body with hip, knee and ankle motors about as strong as human muscle, and no animation: every step is physics. It balances the way people do, by stepping further ahead when it starts to fall forward. A small tug on the torso makes it stumble and recover; yank it and it falls (Reset stands it up again).' };
+SCENES[14] = { name: 'Crossing', robot: true, crossing: true, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
+  // Car body, then (after its wheels) the person: torso and the two legs in their own colours.
+  palette: i => i === 1 ? 0 : i < 12 ? (i === 8 ? 2 : 1) : i < 15 ? 3 : 2,
+  note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs.' };
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -146,7 +150,10 @@ floor.receiveShadow = true;
 const rods = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial());
 rods.frustumCulled = false;
 // The car scene's circular road, 7 m wide.
-const road = new THREE.Mesh(new THREE.RingGeometry(26.5, 33.5, 160), new THREE.MeshLambertMaterial());
+// Drawn just in front of the floor at any distance (polygon offset), not 4 mm above it,
+// which the depth buffer cannot tell apart from far away.
+const road = new THREE.Mesh(new THREE.RingGeometry(26.5, 33.5, 160),
+  new THREE.MeshLambertMaterial({ polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
 road.rotation.x = -Math.PI / 2;
 road.position.y = 0.004;
 road.receiveShadow = true;
@@ -208,7 +215,7 @@ function loadScene(id) {
   $('note').textContent = SCENES[id].note;
   [...$('scenes').children].forEach(b => b.setAttribute('aria-pressed', +b.dataset.id === id));
   $('fire').hidden = !!SCENES[id].robot; // robots have no contact yet
-  road.visible = !!SCENES[id].car;
+  road.visible = !!(SCENES[id].car || SCENES[id].crossing);
   const watching = SCENES[id].learning || SCENES[id].trained; // these robots cannot be dragged
   $('hint').textContent = (watching ? 'Drag' : 'Drag an object to pull it around. Drag empty space') + ' to look around, scroll to zoom'
     + (SCENES[id].robot ? '.' : ', double-click to fire a ball at that spot.')
@@ -229,7 +236,8 @@ function sync() {
       const shape = box ? new THREE.BoxGeometry(2 * b[8], 2 * b[9], 2 * b[10])
         : wheel ? new THREE.CylinderGeometry(b[8], b[8], 2 * b[9], 14)
         : new THREE.SphereGeometry(b[8], 32, 16);
-      const color = wheel ? colors.ink : colors.bodies[Math.floor((i - 1) / SCENES[current].group) % 4];
+      const { palette, group } = SCENES[current];
+      const color = wheel ? colors.ink : colors.bodies[(palette ? palette(i) : Math.floor((i - 1) / group)) % 4];
       mesh = new THREE.Mesh(shape, new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
       mesh.castShadow = mesh.receiveShadow = true;
       mesh.userData.body = wheel ? null : i; // wheels are drawn only; grab the car by its body
@@ -248,6 +256,8 @@ function sync() {
     ? `Attempt ${wasm.trials() + 1} · best so far ${wasm.best_seconds().toFixed(1)} s of 10`
     : SCENES[current].trained
     ? `Run ${run} · ${metres.toFixed(1)} m in ${seconds.toFixed(1)} s · ${(metres / Math.max(seconds, 0.5)).toFixed(1)} m/s average`
+    : SCENES[current].crossing
+    ? `Car ${wasm.car(0).toFixed(0)} km/h · ${wasm.car(5) ? 'braking for the person crossing' : 'road clear, driving on'}`
     : SCENES[current].walking
     ? `${wasm.walker(0).toFixed(2)} m/s average · ${wasm.walker(1)} steps · ${wasm.walker(2).toFixed(2)} steps a second`
     : SCENES[current].car
@@ -332,7 +342,7 @@ function steerByKeys() {
   wasm.drive(keys.has('up') - keys.has('down'), keys.has('left') - keys.has('right'));
 }
 
-[13, 12, 9, 11, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots and vehicles first
+[14, 13, 12, 9, 11, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots and vehicles first
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';

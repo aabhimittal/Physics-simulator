@@ -44,6 +44,10 @@ pub extern "C" fn load(scene: u32) {
         s.robot = ((FIRST_ROBOT_SCENE..LEARNING_SCENE).contains(&scene) || scene == WALK_SCENE)
             .then(|| robot::demo(scene - FIRST_ROBOT_SCENE));
         s.world = scenes::load(scene); // empty in the robot scenes
+        if scene == scenes::CROSSING_SCENE {
+            let (world, walker) = scenes::crossing();
+            (s.world, s.robot) = (world, Some(walker));
+        }
         s.grabbed = None;
     })
 }
@@ -54,6 +58,7 @@ pub extern "C" fn step(dt: f64) {
         // One learner step is one control period, the same length as a frame.
         None if s.learner.is_some() => s.learner.as_mut().unwrap().tick(),
         None if s.player.is_some() => s.player.as_mut().unwrap().tick(),
+        Some(r) if !s.world.cars.is_empty() => scenes::step_crossing(&mut s.world, r, dt),
         // Ground contact is stiff, so robots that touch the floor take smaller steps.
         Some(r) => r.step(dt, if r.ground { 16 } else { 8 }),
         None => s.world.step(dt),
@@ -127,8 +132,10 @@ pub extern "C" fn grab(body: u32, x: f64, y: f64, z: f64) {
     with(|s| {
         let (a, at) = (body as usize, Vec3::new(x, y, z));
         if let Some(r) = &mut s.robot {
-            // Drawn body 0 is the ground, so link i is drawn body i + 1.
-            if let Some(link) = a.checked_sub(1).filter(|&l| l < r.links.len()) {
+            // The robot is drawn after the world's bodies and wheels (in robot scenes, just the
+            // ground), so link i is drawn body i + that many.
+            let before = s.world.bodies.len() + 4 * s.world.cars.len();
+            if let Some(link) = a.checked_sub(before).filter(|&l| l < r.links.len()) {
                 let (o, rot) = r.frames(&r.q)[link];
                 r.pull = Some(Pull {
                     link,
@@ -236,7 +243,7 @@ pub extern "C" fn drive(throttle: f64, steer: f64) {
 }
 
 /// Car scene readout: `[speed km/h, sideways acceleration in g, body roll in degrees,
-/// front tyre slip angle in degrees, 1 if on autopilot]`.
+/// front tyre slip angle in degrees, 1 if on autopilot, 1 if slowing for a pedestrian]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn car(field: u32) -> f64 {
     with(|s| {
@@ -257,7 +264,8 @@ pub extern "C" fn car(field: u32) -> f64 {
                     .to_degrees()
                     / 2.0
             }
-            _ => car.autopilot.is_some() as u8 as f64,
+            4 => car.autopilot.is_some() as u8 as f64,
+            _ => car.yielding as u8 as f64,
         }
     })
 }
