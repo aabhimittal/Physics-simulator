@@ -7,6 +7,7 @@
 //! applied at any point all fall out of calling it with different inputs.
 
 use crate::{Quat, Shape, Vec3};
+use std::cell::Cell;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum JointKind {
@@ -112,8 +113,9 @@ pub struct Robot {
     /// Where the controller is trying to go, for display.
     pub target: Option<Vec3>,
     /// Whatever the controller needs to remember between calls. The walker keeps its
-    /// stance leg (0 or 1), when the current phase began, and how many steps it has taken.
-    pub memory: [f64; 3],
+    /// stance leg (0 or 1), when the current step began, how many steps it has taken, and
+    /// when it began reaching for the ground with the swing foot (infinite until it does).
+    pub memory: [f64; 4],
     pub pull: Option<Pull>,
     /// Whether the links collide with the floor at y = 0.
     pub ground: bool,
@@ -131,7 +133,7 @@ impl Robot {
             time: 0.0,
             controller: None,
             target: None,
-            memory: [0.0; 3],
+            memory: [0.0, 0.0, 0.0, f64::INFINITY],
             pull: None,
             ground: false,
         }
@@ -648,7 +650,8 @@ const HOP_STANCE_TIME: f64 = 0.18;
 
 /// A walking person, 70 kg and 1.6 m from sole to the top of the torso, free to move
 /// and fall in the x-y plane (like the hopper): torso, then for each leg a thigh, shin
-/// and foot, joined by hip, knee and ankle motors about as strong as human muscle.
+/// and foot (links 3-5 and 6-8), then for each arm an upper arm and forearm (9-10 and
+/// 11-12), joined by motors about as strong as human muscle.
 pub fn walker() -> Robot {
     let free =
         |parent, kind, axis| Link::new(parent, kind, axis, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0);
@@ -659,7 +662,7 @@ pub fn walker() -> Robot {
         Vec3::ZERO,
         Vec3::Y * 0.32,
         Vec3::new(0.1, 0.32, 0.15),
-        47.0,
+        40.0,
     );
     let mut links = vec![
         free(None, JointKind::Slide, Vec3::X),
@@ -712,6 +715,32 @@ pub fn walker() -> Robot {
         // No ankle limit: the foot is so light that the stiff limit damper makes RK4 blow up
         // at this time step. Its controller keeps it in range instead.
     }
+    // Arms: shoulder and elbow on each side, upper arm then forearm with the hand.
+    for side in [1.0, -1.0] {
+        let shoulder = links.len();
+        let mut upper = Link::new(
+            Some(2),
+            JointKind::Hinge,
+            Vec3::Z,
+            Vec3::new(0.0, 0.58, 0.2 * side),
+            Vec3::Y * -0.14,
+            Vec3::new(0.04, 0.14, 0.04),
+            2.0,
+        );
+        let mut fore = Link::new(
+            Some(shoulder),
+            JointKind::Hinge,
+            Vec3::Z,
+            Vec3::Y * -0.28,
+            Vec3::Y * -0.17,
+            Vec3::new(0.035, 0.17, 0.035),
+            1.5,
+        );
+        (upper.gear, upper.free_speed) = (80.0, 12.0);
+        (fore.gear, fore.free_speed, fore.range) = (50.0, 12.0, Some((0.0, 2.4)));
+        links.push(upper);
+        links.push(fore);
+    }
     let mut r = Robot::new(links);
     r.q[1] = WALKER_LEG + 0.005;
     r.qd[0] = 0.4;
@@ -730,7 +759,8 @@ const WALKER_LEG: f64 = 0.44 + 0.42 + 0.075;
 ///   stance foot (stepping into a fall stops it, as people do);
 /// - the stance hip holds the torso upright in the world, taking whatever torque that needs.
 fn walk(r: &mut Robot) {
-    let [stance_side, phase_start, steps] = r.memory;
+    let g = GAIT.with(Cell::get);
+    let [stance_side, step_start, steps, mut landing_start] = r.memory;
     let side = stance_side as usize;
     let (stance, swing) = ([3, 6][side], [6, 3][side]);
     let frames = r.frames(&r.q);
@@ -744,10 +774,18 @@ fn walk(r: &mut Robot) {
             })
             .fold(f64::INFINITY, |low, p| low.min(p.y))
     };
-    // Phase: swinging (first 0.3 s), then waiting for the swing foot to land.
-    let swinging = r.time - phase_start < WALK.swing_time;
-    if !swinging && sole(swing + 2) < 0.005 {
-        r.memory = [1.0 - stance_side, r.time, steps + 1.0];
+    // Phase: swinging, then reaching for the ground until the swing foot lands. The reach
+    // starts after `swing_time`, or sooner once the stance leg is well behind the body, as a
+    // person reaches sooner when walking faster; a fixed time alone lets a fast body fall
+    // past its stance foot with the other foot still in the air.
+    if landing_start.is_infinite()
+        && (r.time - step_start > g.swing_time || r.q[2] + r.q[stance] < -STANCE_BEHIND)
+    {
+        landing_start = r.time;
+        r.memory[3] = r.time;
+    }
+    if r.time > landing_start && sole(swing + 2) < 0.005 {
+        r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY];
         return walk(r);
     }
     let total: f64 = r.links.iter().map(|l| l.mass).sum();
@@ -763,74 +801,150 @@ fn walk(r: &mut Robot) {
     };
     let (com, com_vel) = (com / total, com_vel / total);
     let ankle = frames[stance + 2].0;
-    let target = if swinging {
-        WALK.swinging
-    } else {
-        WALK.landing
-    };
+    // Muscles ramp rather than switch: the targets blend from one pose to the next over 0.1 s.
+    let blend = smoothstep((r.time - landing_start) / 0.1);
+    let target = g.swinging.mix(&g.landing, blend);
     let pitch = r.q[2];
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
     // Swing hip: aimed in the world frame, plus the balance feedback.
-    let aim =
-        target.swing_hip + WALK.distance_gain * (com.x - ankle.x) + WALK.speed_gain * com_vel.x;
+    let aim = target.swing_hip + g.distance_gain * (com.x - ankle.x) + g.speed_gain * com_vel.x;
     let swing_hip = pd(pitch + r.q[swing], r.qd[2] + r.qd[swing], aim, 300.0);
-    let torso = pd(pitch, r.qd[2], WALK.lean, 600.0);
-    let mut torque = [0.0; 9];
+    let torso = pd(pitch, r.qd[2], g.lean, 600.0);
+    let mut torque = vec![0.0; r.q.len()];
     torque[swing] = swing_hip;
     torque[stance] = -torso - swing_hip;
     torque[swing + 1] = pd(r.q[swing + 1], r.qd[swing + 1], target.swing_knee, 300.0);
-    torque[swing + 2] = pd(r.q[swing + 2], r.qd[swing + 2], target.swing_ankle, 30.0);
-    torque[stance + 1] = pd(r.q[stance + 1], r.qd[stance + 1], target.stance_knee, 300.0);
-    torque[stance + 2] = pd(r.q[stance + 2], r.qd[stance + 2], target.stance_ankle, 30.0);
-    for i in 3..9 {
+    // Push-off: while the trailing foot is still on the ground the calf points its toe down
+    // and drives the body forward; once the foot lifts the ankle relaxes toe-up for clearance.
+    // As people do, it sets the walking speed: the push eases off when faster than wanted.
+    // Without this the body speeds up until it stumbles. (Pushing harder when slow is left
+    // out: from a standstill, before a stride exists, that throws the body backwards.)
+    let effort = (1.0 + PUSH_GAIN * (g.speed - com_vel.x)).clamp(0.0, 1.0);
+    torque[swing + 2] = if sole(swing + 2) < 0.005 {
+        pd(
+            r.q[swing + 2],
+            r.qd[swing + 2],
+            g.push_off * effort,
+            g.ankle_stiffness,
+        )
+    } else {
+        pd(r.q[swing + 2], r.qd[swing + 2], target.swing_ankle, 30.0)
+    };
+    torque[stance + 1] = pd(
+        r.q[stance + 1],
+        r.qd[stance + 1],
+        target.stance_knee,
+        g.knee_stiffness,
+    );
+    torque[stance + 2] = pd(
+        r.q[stance + 2],
+        r.qd[stance + 2],
+        target.stance_ankle,
+        g.ankle_stiffness,
+    );
+    // Arms swing opposite to the leg on their own side, about as far as people's do, elbows
+    // a little bent and bending more as the arm swings forward.
+    for (shoulder, hip) in [(9, 3), (11, 6)] {
+        let want = -0.6 * (pitch + r.q[hip]);
+        torque[shoulder] = pd(r.q[shoulder], r.qd[shoulder], want, 60.0);
+        let elbow = 0.3 + 0.4 * want.max(0.0);
+        torque[shoulder + 1] = pd(r.q[shoulder + 1], r.qd[shoulder + 1], elbow, 30.0);
+    }
+    for i in 3..r.q.len() {
         r.ctrl[i] = torque[i] / r.links[i].gear;
     }
     r.target = Some(Vec3::new(com.x, 0.02, 0.0)); // drawn under the centre of mass
 }
 
+fn smoothstep(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// Target joint angles (rad) for one phase. Hip angles are of the thigh from vertical,
 /// positive forward; knees bend negative; ankles positive lift the toe.
-#[derive(Clone, Copy)]
-struct Pose {
-    swing_hip: f64,
-    swing_knee: f64,
-    swing_ankle: f64,
-    stance_knee: f64,
-    stance_ankle: f64,
+#[derive(Clone, Copy, Debug)]
+pub struct Pose {
+    pub swing_hip: f64,
+    pub swing_knee: f64,
+    pub swing_ankle: f64,
+    pub stance_knee: f64,
+    pub stance_ankle: f64,
 }
 
-struct Gait {
-    swing_time: f64,
-    swinging: Pose,
-    landing: Pose,
-    distance_gain: f64,
-    speed_gain: f64,
+impl Pose {
+    fn mix(&self, other: &Pose, t: f64) -> Pose {
+        let m = |a: f64, b: f64| a + (b - a) * t;
+        Pose {
+            swing_hip: m(self.swing_hip, other.swing_hip),
+            swing_knee: m(self.swing_knee, other.swing_knee),
+            swing_ankle: m(self.swing_ankle, other.swing_ankle),
+            stance_knee: m(self.stance_knee, other.stance_knee),
+            stance_ankle: m(self.stance_ankle, other.stance_ankle),
+        }
+    }
+}
+
+/// The walking controller's parameters.
+#[derive(Clone, Copy, Debug)]
+pub struct Gait {
+    pub swing_time: f64,
+    pub swinging: Pose,
+    pub landing: Pose,
+    /// Balance feedback: extra swing-hip angle per metre the body is ahead of the stance
+    /// foot, and per m/s of its speed.
+    pub distance_gain: f64,
+    pub speed_gain: f64,
     /// Torso angle from vertical (rad), positive leaning back.
-    lean: f64,
+    pub lean: f64,
+    /// Ankle angle the trailing foot pushes off toward before it lifts (rad, toe down
+    /// negative), at the walking speed it aims for (m/s).
+    pub push_off: f64,
+    pub speed: f64,
+    /// Stance knee and ankle stiffness (N·m/rad): how much the leg yields under the body.
+    pub knee_stiffness: f64,
+    pub ankle_stiffness: f64,
 }
 
-/// The SIMBICON paper's walk, retuned for this body: a longer swing, a 3° forward lean
-/// and half the speed feedback give 1.2 m/s at 1.9 steps per second, as people walk.
-const WALK: Gait = Gait {
-    swing_time: 0.5,
+/// The walking gait, found by `tests::tune_walk` (an opt-in test) starting from the
+/// SIMBICON paper's walk. See that test for what it scores.
+pub const WALK: Gait = Gait {
+    swing_time: 0.4984,
     swinging: Pose {
-        swing_hip: 0.5,
-        swing_knee: -1.1,
-        swing_ankle: 0.6,
-        stance_knee: -0.05,
+        swing_hip: 0.4110,
+        swing_knee: -1.0969,
+        swing_ankle: 0.3348,
+        stance_knee: -0.0238,
         stance_ankle: 0.0,
     },
     landing: Pose {
-        swing_hip: -0.1,
-        swing_knee: -0.05,
-        swing_ankle: 0.15,
-        stance_knee: -0.1,
+        swing_hip: -0.0667,
+        swing_knee: -0.0589,
+        swing_ankle: 0.2372,
+        stance_knee: -0.0562,
         stance_ankle: 0.0,
     },
-    distance_gain: 0.5,
-    speed_gain: 0.1,
-    lean: -0.05,
+    distance_gain: 0.6202,
+    speed_gain: 0.2290,
+    lean: 0.0108,
+    push_off: -0.2950,
+    speed: 1.6,
+    knee_stiffness: 664.4,
+    ankle_stiffness: 286.8,
 };
+
+thread_local! {
+    /// The gait every walker uses; `with_gait` swaps it, for tuning.
+    static GAIT: Cell<Gait> = const { Cell::new(WALK) };
+}
+
+/// Runs `f` with walkers on this thread using `gait`.
+pub fn with_gait<T>(gait: Gait, f: impl FnOnce() -> T) -> T {
+    let old = GAIT.with(|g| g.replace(gait));
+    let out = f();
+    GAIT.with(|g| g.set(old));
+    out
+}
 
 /// Demo robots, in the order of the web page's robot scenes.
 pub fn demo(id: u32) -> Robot {
@@ -864,3 +978,6 @@ pub fn boxes(r: &Robot) -> Vec<(Vec3, Quat, Shape)> {
         .chain(rods)
         .collect()
 }
+
+const PUSH_GAIN: f64 = 1.0;
+const STANCE_BEHIND: f64 = 0.25;

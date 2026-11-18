@@ -232,13 +232,13 @@ fn walker_walks_at_human_speed_and_cadence() {
             r.q[2]
         );
     }
-    // People walk at about 1.2 to 1.4 m/s, 1.8 to 2 steps per second, 0.6 to 0.75 m a step.
+    // A brisk human walk: about 1.5 to 1.8 m/s at 1.7 to 2 steps per second.
     let (speed, cadence) = (r.q[0] / r.time, r.memory[2] / r.time);
     let stride = r.q[0] / r.memory[2];
     println!("{speed:.2} m/s, {cadence:.2} steps/s, {stride:.2} m a step");
-    assert!((1.0..1.5).contains(&speed), "{speed:.2} m/s");
-    assert!((1.6..2.2).contains(&cadence), "{cadence:.2} steps/s");
-    assert!((0.5..0.8).contains(&stride), "{stride:.2} m a step");
+    assert!((1.3..1.8).contains(&speed), "{speed:.2} m/s");
+    assert!((1.6..2.1).contains(&cadence), "{cadence:.2} steps/s");
+    assert!((0.7..1.0).contains(&stride), "{stride:.2} m a step");
 }
 
 #[test]
@@ -283,4 +283,208 @@ fn knocked_down_walker_comes_to_rest() {
     }
     assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
     assert!(r.qd[0].abs() < 0.2, "still sliding at {} m/s", r.qd[0]);
+}
+
+/// Gait measurements over seconds 5 to 15 of walking: speed, cadence, the most the knee of
+/// the only foot on the ground bends, the swing knee's peak, the ankle's push-off (most
+/// toe-down), toe-first landings per step, and the torso's largest tilt. `None` if it fell.
+fn gait_measures(shove: f64) -> Option<[f64; 7]> {
+    let sole = |r: &Robot, foot: usize| {
+        let (o, rot) = r.frames(&r.q)[foot];
+        let l = &r.links[foot];
+        (0..4)
+            .map(|k| {
+                (o + rot * (l.com + l.half * dvec3([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1])))
+                    .y
+            })
+            .fold(f64::INFINITY, f64::min)
+    };
+    let mut r = robot::walker();
+    let (mut stance_knee, mut swing_knee, mut push_off, mut tilt, mut toe_first) =
+        (0f64, 0f64, 0f64, 0f64, 0.0);
+    let (mut was_down, mut x0, mut steps0) = ([true, true], 0.0, 0.0);
+    for frame in 0..(15.0 / DT) as usize {
+        r.pull = (shove != 0.0 && (300..312).contains(&frame)).then(|| Pull {
+            link: 2,
+            local: dvec3(0.0, 0.3, 0.0),
+            target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
+        });
+        r.step(DT, 16);
+        if !(r.q[1] > 0.6 && r.q[2].abs() < 1.0) {
+            return None;
+        }
+        if frame == 300 {
+            (x0, steps0) = (r.q[0], r.memory[2]);
+        }
+        if frame < 300 {
+            continue;
+        }
+        let down = [sole(&r, 5) < 0.005, sole(&r, 8) < 0.005];
+        for (k, leg) in [(0, 3), (1, 6)] {
+            if down[k] && !down[1 - k] {
+                stance_knee = stance_knee.max(-r.q[leg + 1]);
+            }
+            if !down[k] {
+                swing_knee = swing_knee.max(-r.q[leg + 1]);
+            }
+            if down[k] && !was_down[k] && r.q[2] + r.q[leg] + r.q[leg + 1] + r.q[leg + 2] < 0.0 {
+                toe_first += 1.0;
+            }
+            push_off = push_off.min(r.q[leg + 2]);
+        }
+        was_down = down;
+        tilt = tilt.max(r.q[2].abs());
+    }
+    let steps = r.memory[2] - steps0;
+    Some([
+        (r.q[0] - x0) / 10.0,
+        steps / 10.0,
+        stance_knee,
+        swing_knee,
+        push_off,
+        toe_first / steps.max(1.0),
+        tilt,
+    ])
+}
+
+/// How far a gait is from typical adult walking (speed 1.3 m/s, 1.85 steps a second, stance
+/// knee 18°, swing knee 60°, push-off to -16°, heel-first landings, upright torso), and
+/// heavily penalised if it falls on its own or after a 250 N shove either way.
+fn gait_cost() -> f64 {
+    let Some(
+        [
+            speed,
+            cadence,
+            stance_knee,
+            swing_knee,
+            push_off,
+            toe_first,
+            tilt,
+        ],
+    ) = gait_measures(0.0)
+    else {
+        return 1e4;
+    };
+    let d = f64::to_radians;
+    let falls = [0.06, -0.06]
+        .iter()
+        .filter(|&&s| gait_measures(s).is_none())
+        .count() as f64;
+    ((speed - 1.3) / 0.1).powi(2)
+        + ((cadence - 1.85) / 0.1).powi(2)
+        + ((stance_knee - d(18.0)) / d(5.0)).powi(2)
+        + ((swing_knee - d(60.0)) / d(10.0)).powi(2)
+        + ((push_off + d(16.0)) / d(4.0)).powi(2)
+        + 10.0 * toe_first
+        + (tilt / d(8.0)).powi(2)
+        + 100.0 * falls
+}
+
+/// Tunes the walking gait by random search: perturb the best parameters, keep a trial if it
+/// scores better, widen the search after a success and narrow it after failures. Prints the
+/// best gait as Rust to paste into `robot::WALK`. Slow, so opt in:
+/// `cargo test --release --test robot tune_walk -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tune_walk() {
+    use physics_simulator::env::Rng;
+    use physics_simulator::robot::{Gait, WALK, with_gait};
+    let pack = |g: &Gait| {
+        [
+            g.swing_time,
+            g.swinging.swing_hip,
+            g.swinging.swing_knee,
+            g.swinging.swing_ankle,
+            g.swinging.stance_knee,
+            g.landing.swing_hip,
+            g.landing.swing_knee,
+            g.landing.swing_ankle,
+            g.landing.stance_knee,
+            g.distance_gain,
+            g.speed_gain,
+            g.lean,
+            g.push_off,
+            g.knee_stiffness,
+            g.ankle_stiffness,
+        ]
+    };
+    let unpack = |v: &[f64; 15]| {
+        let mut g = WALK;
+        [
+            g.swing_time,
+            g.swinging.swing_hip,
+            g.swinging.swing_knee,
+            g.swinging.swing_ankle,
+            g.swinging.stance_knee,
+            g.landing.swing_hip,
+            g.landing.swing_knee,
+            g.landing.swing_ankle,
+            g.landing.stance_knee,
+            g.distance_gain,
+            g.speed_gain,
+            g.lean,
+            g.push_off,
+            g.knee_stiffness,
+            g.ankle_stiffness,
+        ] = *v;
+        g
+    };
+    let scale = [
+        0.04, 0.08, 0.1, 0.1, 0.05, 0.08, 0.05, 0.08, 0.05, 0.08, 0.05, 0.02, 0.08, 60.0, 40.0,
+    ];
+    let score = |v: &[f64; 15]| with_gait(unpack(v), gait_cost);
+    let mut best = pack(&WALK);
+    let mut best_cost = score(&best);
+    let mut rng = Rng::new(7);
+    let mut sigma = 1.0;
+    println!("start: cost {best_cost:.1}");
+    for round in 0..120 {
+        let trials: Vec<[f64; 15]> = (0..4)
+            .map(|_| std::array::from_fn(|i| best[i] + sigma * scale[i] * rng.uniform()))
+            .collect();
+        let costs: Vec<f64> = std::thread::scope(|s| {
+            let handles: Vec<_> = trials.iter().map(|t| s.spawn(move || score(t))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let (i, &cost) = costs
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap();
+        if cost < best_cost {
+            (best, best_cost) = (trials[i], cost);
+            sigma = (sigma * 1.3).min(2.0);
+            println!(
+                "round {round}: cost {best_cost:.2} {:?}",
+                with_gait(unpack(&best), || gait_measures(0.0))
+            );
+        } else {
+            sigma = (sigma * 0.85).max(0.1);
+        }
+    }
+    println!("best cost {best_cost:.2}\n{:#?}", unpack(&best));
+}
+
+#[test]
+fn walker_steps_evenly() {
+    // Every step alike, as in a person's walk: an irregular gait (long steps building up to a
+    // stumble) is what looked most robotic. Step lengths after 5 s stay within 10% of their mean.
+    let mut r = robot::walker();
+    let (mut lengths, mut last_x, mut steps) = (vec![], 0.0, 0.0);
+    for frame in 0..(25.0 / DT) as usize {
+        r.step(DT, 16);
+        if r.memory[2] != steps {
+            if frame > 300 {
+                lengths.push(r.q[0] - last_x);
+            }
+            (last_x, steps) = (r.q[0], r.memory[2]);
+        }
+    }
+    let mean = lengths.iter().sum::<f64>() / lengths.len() as f64;
+    for (i, l) in lengths.iter().enumerate() {
+        assert!(
+            (l - mean).abs() < 0.1 * mean,
+            "step {i} is {l:.2} m against a mean of {mean:.2} m"
+        );
+    }
 }

@@ -243,7 +243,8 @@ pub extern "C" fn drive(throttle: f64, steer: f64) {
 }
 
 /// Car scene readout: `[speed km/h, sideways acceleration in g, body roll in degrees,
-/// front tyre slip angle in degrees, 1 if on autopilot, 1 if slowing for a pedestrian]`.
+/// front tyre slip angle in degrees, 1 if on autopilot, 1 if slowing for a pedestrian,
+/// brake pedal 0..1]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn car(field: u32) -> f64 {
     with(|s| {
@@ -265,7 +266,8 @@ pub extern "C" fn car(field: u32) -> f64 {
                     / 2.0
             }
             4 => car.autopilot.is_some() as u8 as f64,
-            _ => car.yielding as u8 as f64,
+            5 => car.yielding as u8 as f64,
+            _ => car.brake,
         }
     })
 }
