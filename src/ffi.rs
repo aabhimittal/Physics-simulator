@@ -6,14 +6,7 @@ use crate::vehicle::Car;
 use crate::{Body, Joint, Quat, Shape, Vec3, World, scenes};
 use std::cell::RefCell;
 
-/// Scene ids from here on are robots (`robot::demo`), drawn instead of the rigid-body world.
-const FIRST_ROBOT_SCENE: u32 = 6;
-/// The cart-pole that learns to balance by trial and error (`env::Learner`).
-const LEARNING_SCENE: u32 = 10;
-/// The hopper driven by the trained policy (`env::Player`).
-const TRAINED_SCENE: u32 = 11;
-/// The walking person, `robot::demo(7)`. Scene 12 is the car (`scenes::CAR_SCENE`).
-const WALK_SCENE: u32 = 13;
+use scenes::Kind;
 
 struct State {
     world: World,
@@ -39,12 +32,16 @@ fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
 #[unsafe(no_mangle)]
 pub extern "C" fn load(scene: u32) {
     with(|s| {
-        s.learner = (scene == LEARNING_SCENE).then(|| Learner::new(Task::Balance, 1));
-        s.player = (scene == TRAINED_SCENE).then(|| Player::new(1));
-        s.robot = ((FIRST_ROBOT_SCENE..LEARNING_SCENE).contains(&scene) || scene == WALK_SCENE)
-            .then(|| robot::demo(scene - FIRST_ROBOT_SCENE));
+        let kind = scenes::kind(scene).unwrap_or(Kind::World);
+        s.learner = (kind == Kind::Learning).then(|| Learner::new(Task::Balance, 1));
+        s.player = (kind == Kind::Trained).then(|| Player::new(1));
+        s.robot = match kind {
+            Kind::Robot => Some(robot::demo(scene - scenes::FIRST_ROBOT_SCENE)),
+            Kind::Walking => Some(robot::walker()),
+            _ => None,
+        };
         s.world = scenes::load(scene); // empty in the robot scenes
-        if scene == scenes::CROSSING_SCENE {
+        if kind == Kind::Crossing {
             let (world, walker) = scenes::crossing();
             (s.world, s.robot) = (world, Some(walker));
         }
@@ -131,11 +128,9 @@ pub extern "C" fn state() -> *const f32 {
 pub extern "C" fn grab(body: u32, x: f64, y: f64, z: f64) {
     with(|s| {
         let (a, at) = (body as usize, Vec3::new(x, y, z));
+        let first = robot_drawn_from(s);
         if let Some(r) = &mut s.robot {
-            // The robot is drawn after the world's bodies and wheels (in robot scenes, just the
-            // ground), so link i is drawn body i + that many.
-            let before = s.world.bodies.len() + 4 * s.world.cars.len();
-            if let Some(link) = a.checked_sub(before).filter(|&l| l < r.links.len()) {
+            if let Some(link) = a.checked_sub(first).filter(|&l| l < r.links.len()) {
                 let (o, rot) = r.frames(&r.q)[link];
                 r.pull = Some(Pull {
                     link,
@@ -285,4 +280,32 @@ pub extern "C" fn walker(field: u32) -> f64 {
             }
         })
     })
+}
+
+/// Index in `state()`'s list of the robot's first link: it is drawn after the world's
+/// bodies and the cars' wheels (in robot scenes, just the ground).
+fn robot_drawn_from(s: &State) -> usize {
+    s.world.bodies.len() + 4 * s.world.cars.len()
+}
+
+/// `robot_drawn_from` for the page, which draws the walker's links as a person.
+#[unsafe(no_mangle)]
+pub extern "C" fn robot_first_drawn() -> u32 {
+    with(|s| robot_drawn_from(s) as u32)
+}
+
+/// What scene `id` runs, as `scenes::Kind` (0 world, 1 robot, 2 learning, 3 trained hopper,
+/// 4 car, 5 walking, 6 crossing), or `u32::MAX` past the last scene. The page checks its
+/// scene list against this.
+#[unsafe(no_mangle)]
+pub extern "C" fn scene_kind(id: u32) -> u32 {
+    scenes::kind(id).map_or(u32::MAX, |k| k as u32)
+}
+
+/// Which body part walker link `link` is, as `robot::Part` (0 is not drawn).
+#[unsafe(no_mangle)]
+pub extern "C" fn walker_part(link: u32) -> u32 {
+    robot::WALKER_PARTS
+        .get(link as usize)
+        .map_or(0, |&p| p as u32)
 }

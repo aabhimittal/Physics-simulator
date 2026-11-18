@@ -1,4 +1,4 @@
-# Publishes the browser demo (web/, with the committed sim.wasm) to GitHub Pages on every push to main.
+# Publishes the browser demo (web/, with sim.wasm built from source) to GitHub Pages on every push to main.
 # One-time setup: Settings → Pages → Build and deployment → Source: GitHub Actions.
 name: Deploy demo to GitHub Pages
 
@@ -23,10 +23,17 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v6
+      # Built from source, so the live page always matches the code on main, whatever
+      # the committed web/sim.wasm says.
+      - name: Build the browser simulation
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown
+          cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: web
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

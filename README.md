@@ -35,6 +35,16 @@ cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm
 `web/sim.wasm` is committed so the demo runs without a toolchain. Rebuild it
 after changing anything under `src/`.
 
+`.github/workflows/ci.yml` runs on every pull request and push to `main`: `cargo fmt
+--check`, the Rust and Python tests, the WebAssembly build, and, on pull requests, a
+check that a change to simulation code also updates `web/sim.wasm`. The live site
+(`.github/workflows/pages.yml`) builds `sim.wasm` from source, so it always matches `main`.
+
+Scene ids live in one place, `src/scenes.rs`. The page's `SCENES` list must follow them;
+it checks itself on load and logs `Scene list out of step with src/scenes.rs` to the
+console if not. The walker's body parts, which the page draws as a person, come from
+`robot::WALKER_PARTS`, and a test keeps that list in step with the walker's links.
+
 ## How the robot simulator works
 
 `src/robot.rs`. A robot is a tree of links, each joined to its parent by a

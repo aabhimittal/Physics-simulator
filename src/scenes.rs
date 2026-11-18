@@ -1,8 +1,49 @@
-//! Demo scenes. Ids match the buttons in `web/index.html`.
+//! Demo scenes. Ids match the buttons in `web/index.html`, which checks its list against
+//! `kind` (through the wasm export `scene_kind`) when it loads and reports any mismatch.
 
 use crate::robot::{self, Robot};
 use crate::vehicle::Car;
 use crate::{Body, Joint, Quat, Shape, Vec3, World};
+
+/// Scene ids. 0 to 5 are rigid-body scenes (`load`); robot scenes start here, 6 to 9
+/// being `robot::demo(0..=3)`.
+pub const FIRST_ROBOT_SCENE: u32 = 6;
+/// The cart-pole that learns to balance by trial and error (`env::Learner`).
+pub const LEARNING_SCENE: u32 = 10;
+/// The hopper driven by the trained policy (`env::Player`).
+pub const TRAINED_SCENE: u32 = 11;
+pub const CAR_SCENE: u32 = 12;
+/// The walking person, `robot::walker`.
+pub const WALK_SCENE: u32 = 13;
+/// The person walking across the car's road; see `crossing`.
+pub const CROSSING_SCENE: u32 = 14;
+pub const SCENE_COUNT: u32 = 15;
+
+/// What a scene id runs. The web page derives the same from its own scene list.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u32)]
+pub enum Kind {
+    World,
+    Robot,
+    Learning,
+    Trained,
+    Car,
+    Walking,
+    Crossing,
+}
+
+pub fn kind(id: u32) -> Option<Kind> {
+    Some(match id {
+        id if id < FIRST_ROBOT_SCENE => Kind::World,
+        id if id < LEARNING_SCENE => Kind::Robot,
+        LEARNING_SCENE => Kind::Learning,
+        TRAINED_SCENE => Kind::Trained,
+        CAR_SCENE => Kind::Car,
+        WALK_SCENE => Kind::Walking,
+        CROSSING_SCENE => Kind::Crossing,
+        _ => return None,
+    })
+}
 
 /// Hangs a sphere on a rigid massless rod of length `len` from local point `lb`
 /// of `parent`, swung by `angle` radians about z. Returns the new body's index.
@@ -156,11 +197,6 @@ pub fn load(id: u32) -> World {
     w
 }
 
-/// The car scene's id, after the robot scenes; see `web/index.html`.
-pub const CAR_SCENE: u32 = 12;
-
-/// The scene where a person walks across the car's road; see `crossing`.
-pub const CROSSING_SCENE: u32 = 14;
 /// Where people step out: their straight path along the x axis crosses the road (radius
 /// 30 m, 7 m wide) between x = 26.5 and 33.5, 2 m after this point.
 const KERB: f64 = 24.5;
