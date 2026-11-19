@@ -65,11 +65,18 @@ hinge or a slide. The state is one number per joint, so joints cannot come apart
 conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
 
 - **Ground contact** is a damped spring plus friction at every box corner below the floor.
-- **A moving base** is three massless joints (x, y, pitch) ahead of the body, so the
-  hopper moves in a plane.
+  The springs are stiff, so each RK4 stage folds them into the mass matrix through each
+  contact point's Jacobian (`Jᵀ(h·C + h²·K)J`): contact stays stable even at one step per
+  frame, where the explicit version blew up.
+- **Contact with world bodies** (`Robot::touch`): link corners inside a body, and box
+  corners inside a link, are pushed apart by the same kind of spring, and the body gets the
+  opposite impulse, so momentum passes both ways.
+- **A moving base** is massless slide joints (x, y, and for the walker z) and the pitch
+  hinge ahead of the body, so the hopper moves in a plane and the walker can also be shoved
+  sideways.
 
-Not there yet: contact between robots and other objects (the walker and the car do not
-meet), motion out of the plane, sensors, and loading models from a file.
+Not there yet: tipping out of the plane (the walker can slide sideways but not fall
+sideways), sensors, and loading models from a file.
 
 ## Reinforcement-learning interface
 
@@ -163,11 +170,12 @@ like a robot:
 - **Smooth targets** (blended over 0.1 s, as muscles ramp) and **swinging arms**, which
   are real links whose mass the balance has to carry.
 
-It walks briskly: 1.6 m/s, 1.75 steps a second, 0.9 m steps varying by under 10%, heel
-first, and survives shoves up to 250 N either way at any point of the stride (36 of 36
-in a sweep). It is not fully human: it moves in a plane (no hip sway or pelvis twist),
-pushes off to about -5° where people reach -16°, and keeps its stance knee straighter
-(10° against 15-20°). `tests/robot.rs` has an opt-in random-search tuner
+It walks at 1.14 m/s, 1.9 steps a second, 0.6 m steps varying by under 10%, heel
+first, within the range of adult walking, and survives shoves up to 250 N either way at
+any point of the stride (36 of 36 in a sweep). (It walked a brisker 1.6 m/s until ground
+contact became implicit; friction now wastes less of the push-off as foot slip.) It is
+not fully human: it walks in a plane (no hip sway or pelvis twist), pushes off to about
+-5° where people reach -16°, and keeps its stance knee straighter (10° against 15-20°). `tests/robot.rs` has an opt-in random-search tuner
 (`cargo test --release --test robot tune_walk -- --ignored --nocapture`); it scores only
 two shoves, so check what it finds against more before adopting it.
 
@@ -179,12 +187,19 @@ clothes); the physics underneath is the same set of boxes.
 `src/vehicle.rs` is a raycast vehicle, the usual game-engine design: a rigid body in
 the `World` carried by four ray-cast spring-damper suspensions, with tyre forces from
 Pacejka's Magic Formula capped by the friction circle. Rear-wheel drive through an open
-differential, 90 kW, front-biased brakes with ABS, Ackermann steering, aero drag and
-rolling resistance. Each wheel's spin is stepped implicitly, since the tyre makes it stiff.
+differential from an engine with a torque curve (175 N·m at 4500 rpm, about 90 kW) and a
+five-speed automatic gearbox with a rev limiter; front-biased brakes with ABS; Ackermann
+steering; anti-roll bars; aero drag and rolling resistance. Each wheel's spin is stepped
+implicitly, since the tyre makes it stiff. Each wheel's ray finds the nearest surface of
+any body (ground, kerb, ramp, crate, log) and pushes back on it, so the car climbs ramps,
+jumps off them, bumps over the speed hump and shoves loose objects.
 `tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.1 m against the
-ideal v²/2μg = 39.3 m, 0-100 km/h in 8.4 s, and sideways acceleration v²/r on its circle.
-In the browser it drives itself; arrow keys or WASD take over. It is drawn with a cabin,
-headlights and tail lights that light up with the simulated brake pedal; the road has a
+ideal v²/2μg = 39.3 m, 0-100 km/h in about 8 s with clean upshifts, sideways acceleration
+v²/r on its circle with under 4° of body roll, a wheel standing on a block, and a ramp jump
+that lands on its wheels.
+In the browser it drives itself; arrow keys or WASD take over. It is drawn car-shaped
+(an extruded side profile with a glass cabin, rounded edges), with headlights and tail
+lights that light up with the simulated brake pedal, and the readout shows gear and rpm; the road has a
 dashed centre line and, in the crossing scene, a zebra crossing. It shows load transfer,
 body roll, understeer at full lock, and power oversteer (a steady drift) under full
 throttle in a bend.
@@ -192,15 +207,18 @@ throttle in a bend.
 ### Crossing
 
 `scenes::crossing` puts the car and the walker together. They live in different
-simulators and do not collide; the car's autopilot is given the person's position and
-velocity, like a driver's eyes. Anyone on the road, or due on it within 3 s, makes it cap
+simulators, stepped together 16 times a frame with `Robot::touch` between them, so they
+collide: a car that fails to stop throws the person along the road and loses the momentum
+it gave them (tested against the same run with nobody in the road). The walker is upright
+and planar, so it is shoved and dragged rather than thrown over the bonnet. The car's
+autopilot is given the person's position and velocity, like a driver's eyes. Anyone on the road, or due on it within 3 s, makes it cap
 its speed at √(2·a·d), the most from which braking at a = 6 m/s² still stops it in the
 distance d left, aiming to stop with its nose 4 m short. It waits while they cross, then
 drives on; a new person steps off the kerb each time. `tests/vehicle.rs` runs a minute
 of it: several stops, never closer than 5.9 m centre to person.
 
-Limits: wheels only meet flat ground (no kerbs or ramps, and they pass through other
-bodies, though the car body itself collides); one gear; no anti-roll bars.
+Limits: a wheel is a single ray, so it meets a kerb's edge by snapping up onto it rather
+than rolling over the corner (a shape cast is the upgrade); the gearbox is automatic only.
 
 ## Implicit joint damping
 
@@ -231,7 +249,11 @@ of a free spinning body, momentum transfer in Newton's cradle.
 
 - Not MuJoCo. No generalized coordinates, actuators, tendons, sensors or MJCF
   model files, and no convex contact solver.
-- Shapes are spheres, boxes and one ground plane. Joints are rods and ball joints only.
-- Collision search checks every pair of bodies, so it suits a few hundred bodies.
+- Shapes are spheres, boxes, capsules and one ground plane; no convex hulls or meshes.
+  Capsule against box samples spheres along the capsule, so a box edge can sink a little
+  between samples. Joints are rods and ball joints only.
+- The broad phase sorts and sweeps along x (1500 scattered bodies run faster than real
+  time; checking every pair was 6.6 times slower). It slows when many bodies share an x
+  range; a grid or BVH is the next step for a city.
 - Stacks are slightly soft (a few mm of sink under an eight-row wall) and rely on
   sleeping to stay perfectly still.

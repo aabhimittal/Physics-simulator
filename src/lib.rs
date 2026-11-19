@@ -18,6 +18,7 @@ pub mod scenes;
 pub mod vehicle;
 
 use collide::Contact;
+pub use collide::{Hit, penetration, raycast};
 
 /// Bodies slower than this (m/s, rad/s) for `SLEEP_AFTER` seconds fall asleep.
 /// Without sleeping, solver noise makes resting piles creep a few mm per second.
@@ -31,6 +32,9 @@ pub enum Shape {
     Sphere(f64),
     /// Half extents.
     Box(Vec3),
+    /// Radius, and half the length of the segment it is swept along (the body's y axis):
+    /// a cylinder with round ends, the usual shape for limbs, logs, barrels and characters.
+    Capsule(f64, f64),
 }
 
 pub struct Body {
@@ -58,6 +62,17 @@ impl Body {
             Shape::Sphere(r) => {
                 let m = density * 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
                 (m, Vec3::splat(0.4 * m * r * r))
+            }
+            Shape::Capsule(r, half) => {
+                // A cylinder plus two half spheres; each cap's inertia about the centre is
+                // shifted out by the parallel axis theorem.
+                let pi = std::f64::consts::PI;
+                let (len, rr) = (2.0 * half, r * r);
+                let (cyl, caps) = (density * pi * rr * len, density * 4.0 / 3.0 * pi * rr * r);
+                let along = cyl * rr / 2.0 + caps * 0.4 * rr;
+                let across = cyl * (rr / 4.0 + len * len / 12.0)
+                    + caps * (0.4 * rr + len * len / 4.0 + 3.0 * len * r / 8.0);
+                (cyl + caps, Vec3::new(across, along, across))
             }
             Shape::Box(h) => {
                 let m = density * 8.0 * h.x * h.y * h.z;
@@ -104,6 +119,7 @@ impl Body {
             Shape::Plane => f64::INFINITY,
             Shape::Sphere(r) => r,
             Shape::Box(h) => h.length(),
+            Shape::Capsule(r, half) => r + half,
         }
     }
 
@@ -266,7 +282,7 @@ impl World {
         let h = dt / self.substeps as f64;
         for _ in 0..self.substeps {
             for car in &mut self.cars {
-                car.update(&mut self.bodies[car.body], h);
+                car.update(&mut self.bodies, h);
             }
             self.integrate(h);
             self.find_contacts();
@@ -305,20 +321,52 @@ impl World {
 
     fn find_contacts(&mut self) {
         self.contacts.clear();
-        // shortcut: O(n²) bounding-sphere broadphase, fine for a few hundred bodies; use a grid or BVH beyond that.
-        for i in 0..self.bodies.len() {
-            for j in i + 1..self.bodies.len() {
-                let (a, b) = (&self.bodies[i], &self.bodies[j]);
-                let reach = a.radius() + b.radius();
-                if (a.active() || b.active()) && a.pos.distance_squared(b.pos) <= reach * reach {
-                    let before = self.contacts.len();
-                    collide::collide(&self.bodies, i, j, &mut self.contacts);
-                    if self.contacts.len() > before {
-                        self.wake_pair(i, j);
-                    }
+        for (i, j) in self.candidate_pairs() {
+            let before = self.contacts.len();
+            collide::collide(&self.bodies, i, j, &mut self.contacts);
+            if self.contacts.len() > before {
+                self.wake_pair(i, j);
+            }
+        }
+    }
+
+    /// Pairs (i < j) whose bounding spheres overlap, at least one of them awake. Sort and
+    /// sweep along x: bodies sorted by the left edge of their bounding sphere, each compared
+    /// only with those that start before it ends, about n log n instead of n². The pairs are
+    /// then put in index order, so contacts are solved in the same order as checking every pair.
+    // shortcut: sweeping one axis degrades when many bodies share an x range (a tall stack, a
+    // long row along z); a grid or BVH is the upgrade for a crowded city.
+    fn candidate_pairs(&self) -> Vec<(usize, usize)> {
+        let b = &self.bodies;
+        let (planes, mut finite): (Vec<usize>, Vec<usize>) =
+            (0..b.len()).partition(|&i| matches!(b[i].shape, Shape::Plane));
+        let left = |i: usize| b[i].pos.x - b[i].radius();
+        finite.sort_by(|&i, &j| left(i).total_cmp(&left(j)));
+        let mut pairs = Vec::new();
+        for &p in &planes {
+            pairs.extend(
+                finite
+                    .iter()
+                    .filter(|&&i| b[i].active())
+                    .map(|&i| (p.min(i), p.max(i))),
+            );
+        }
+        for (k, &i) in finite.iter().enumerate() {
+            let right = b[i].pos.x + b[i].radius();
+            for &j in &finite[k + 1..] {
+                if left(j) > right {
+                    break;
+                }
+                let reach = b[i].radius() + b[j].radius();
+                if (b[i].active() || b[j].active())
+                    && b[i].pos.distance_squared(b[j].pos) <= reach * reach
+                {
+                    pairs.push((i.min(j), i.max(j)));
                 }
             }
         }
+        pairs.sort_unstable();
+        pairs
     }
 
     fn solve_joints(&mut self, h: f64) {
@@ -470,5 +518,47 @@ impl World {
                 (b.vel, b.omega) = (Vec3::ZERO, Vec3::ZERO);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sweep_finds_the_same_pairs_as_checking_every_pair() {
+        // 400 bodies of mixed shapes and sizes scattered in a 20 m cube, some asleep.
+        let mut w = World::default();
+        let mut rng = crate::env::Rng::new(3);
+        for k in 0..400 {
+            let at = Vec3::new(rng.uniform(), rng.uniform(), rng.uniform()) * 10.0;
+            let size = 0.2 + 0.4 * (rng.uniform() + 1.0);
+            let shape = match k % 3 {
+                0 => Shape::Sphere(size),
+                1 => Shape::Box(Vec3::new(size, size * 0.5, size * 0.8)),
+                _ => Shape::Capsule(size * 0.4, size),
+            };
+            let mut body = Body::new(shape, 1.0, at);
+            body.calm = if k % 5 == 0 { SLEEP_AFTER } else { 0.0 };
+            w.add(body);
+        }
+        let b = &w.bodies;
+        let mut every = Vec::new();
+        for i in 0..b.len() {
+            for j in i + 1..b.len() {
+                let reach = b[i].radius() + b[j].radius();
+                if (b[i].active() || b[j].active())
+                    && b[i].pos.distance_squared(b[j].pos) <= reach * reach
+                {
+                    every.push((i, j));
+                }
+            }
+        }
+        assert!(
+            every.len() > 100,
+            "too few overlaps to be a test: {}",
+            every.len()
+        );
+        assert_eq!(w.candidate_pairs(), every);
     }
 }

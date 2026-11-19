@@ -120,7 +120,7 @@ const SCENES = [
 // Scenes added later, out of order: ids must match src/scenes.rs and src/ffi.rs.
 SCENES[12] = { name: 'Car', car: true, follow: 0, group: 1, view: [-0.5, 1.15, 14, [0, 0.6, 30]],
   note: 'A 1200 kg car on four springs. Each tyre grips according to how much it slips, so in the bends the body rolls, the outer tyres carry most of the weight, and the front tyres point a few degrees inside the way the car goes. It speeds up and brakes every 8 s. Drive it yourself with the arrow keys or WASD, into the crates if you like.' };
-SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 2, person: true, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
+SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 3, person: true, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
   note: 'A 70 kg body with hip, knee and ankle motors about as strong as human muscle, and no animation: every step is physics. It balances the way people do, by stepping further ahead when it starts to fall forward. A small tug on the torso makes it stumble and recover; yank it and it falls (Reset stands it up again).' };
 SCENES[14] = { name: 'Crossing', robot: true, crossing: true, person: true, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
   note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs.' };
@@ -225,27 +225,40 @@ function bodyPart(part) {
   return g;
 }
 
-// The car body gets a cabin with dark windows, headlights and tail lights (drawing only).
+// The car is drawn car-shaped: a side profile (bonnet, windscreen, roof, boot) extruded
+// across its width with rounded edges, a glass cabin, lights. The physics body stays a box
+// (hidden), so this is drawing only.
 function dressCar(body, b) {
   const [hx, hy, hz] = [b[8], b[9], b[10]];
-  const glass = new THREE.MeshStandardMaterial({ color: 0x1b2633, roughness: 0.2, metalness: 0.3 });
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(hx * 1.0, hy * 1.2, hz * 1.7), glass);
-  cabin.position.set(-hx * 0.15, hy + hy * 0.6, 0);
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(hx * 0.8, 0.05, hz * 1.75), body.material);
-  roof.position.set(-hx * 0.2, hy + hy * 1.2 + 0.025, 0);
-  body.add(cabin, roof);
-  const lamp = (x, z, color, emissive) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.12, 0.3), new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: 0.6 }));
-    m.position.set(x, hy * 0.35, z);
+  body.material.visible = false;
+  body.children.forEach(c => { c.visible = false; }); // the box's outline
+  const paint = new THREE.MeshStandardMaterial({ color: body.material.color, roughness: 0.35, metalness: 0.2 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x18222e, roughness: 0.15, metalness: 0.4 });
+  const extrude = (points, width, material) => {
+    const shape = new THREE.Shape(points.map(([x, y]) => new THREE.Vector2(x, y)));
+    const g = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: true, bevelSize: 0.05, bevelThickness: 0.05, bevelSegments: 3 });
+    g.translate(0, 0, -width / 2);
+    const m = new THREE.Mesh(g, material);
+    m.castShadow = m.receiveShadow = true;
     body.add(m);
-    return m.material;
   };
-  for (const z of [hz * 0.62, -hz * 0.62]) lamp(hx + 0.02, z, 0xfff6d8, 0xfff2c0);
-  tailLights = lamp(-hx - 0.02, hz * 0.62, 0x7a0d0d, 0xff2a1a);
-  for (const m of body.children) if (m.isMesh) m.castShadow = true;
-  // Both tail lights share one material, so one brightness drives the pair.
-  const right = body.children[body.children.length - 1].clone();
-  right.position.z = -hz * 0.62;
+  // Side profiles in the body's frame: x forward, y up, the box spanning ±hx and ±hy.
+  extrude([[-hx, -hy + 0.05], [hx, -hy + 0.05], [hx + 0.05, -0.05], [hx - 0.1, hy - 0.1], [hx * 0.4, hy],
+    [-hx * 0.85, hy], [-hx, hy - 0.08]], hz * 2 - 0.1, paint);
+  extrude([[hx * 0.4, hy - 0.02], [hx * 0.05, hy + 0.48], [-hx * 0.5, hy + 0.48], [-hx * 0.85, hy - 0.02]], hz * 1.7, glass);
+  extrude([[hx * 0.02, hy + 0.47], [-hx * 0.48, hy + 0.47], [-hx * 0.48, hy + 0.5], [hx * 0.02, hy + 0.5]], hz * 1.72, paint);
+  const lamp = (x, z, color, emissive) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.28), new THREE.MeshStandardMaterial({ color, emissive, emissiveIntensity: 0.6 }));
+    m.position.set(x, 0.05, z);
+    body.add(m);
+    return m;
+  };
+  for (const z of [hz * 0.65, -hz * 0.65]) lamp(hx + 0.06, z, 0xfff6d8, 0xfff2c0);
+  // Both tail lights share one material, so the simulated brake pedal lights the pair.
+  const tail = lamp(-hx - 0.06, hz * 0.65, 0x7a0d0d, 0xff2a1a);
+  tailLights = tail.material;
+  const right = tail.clone();
+  right.position.z = -hz * 0.65;
   body.add(right);
 }
 
@@ -330,6 +343,13 @@ function sync() {
       scene.add(mesh);
       meshes.push(mesh);
     }
+    if (!mesh && b[7] === 4) { // capsule: radius b[8], half length b[9] along its y axis
+      const color = colors.bodies[Math.floor((i - 1) / SCENES[current].group) % 4];
+      mesh = limb(2 * b[9], b[8], b[8], new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
+      mesh.traverse(o => { o.castShadow = o.receiveShadow = true; o.userData.body = i; });
+      scene.add(mesh);
+      meshes.push(mesh);
+    }
     if (!mesh) {
       const [box, wheel] = [b[7] === 2, b[7] === 3];
       // A wheel's 14 flat sides are outlined, so you can see it turn (and see it skid when it doesn't).
@@ -364,6 +384,7 @@ function sync() {
     ? `${wasm.walker(0).toFixed(2)} m/s average · ${wasm.walker(1)} steps · ${wasm.walker(2).toFixed(2)} steps a second`
     : SCENES[current].car
     ? `${wasm.car(0).toFixed(0)} km/h · ${wasm.car(1).toFixed(2)} g sideways · body roll ${wasm.car(2).toFixed(1)}° · front tyres slip ${wasm.car(3).toFixed(1)}°`
+      + ` · gear ${wasm.car(7) < 0 ? 'R' : wasm.car(7)} at ${(wasm.car(8) / 1000).toFixed(1)}k rpm`
       + (wasm.car(4) ? ' · autopilot' : '')
     : `Energy ${energy.toFixed(3)} J${share}`;
 }

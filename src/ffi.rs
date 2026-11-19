@@ -63,7 +63,7 @@ pub extern "C" fn step(dt: f64) {
 }
 
 /// Returns a pointer to `[bodies, joints, energy]`, then per body
-/// `[pos xyz, quat xyzw, shape (0 plane, 1 sphere, 2 box, 3 wheel), size xyz]`,
+/// `[pos xyz, quat xyzw, shape (0 plane, 1 sphere, 2 box, 3 wheel, 4 capsule), size xyz]`,
 /// then per joint the two anchor positions. Wheels are drawn only (they are not bodies):
 /// size is (radius, half width, radius) and the axle is the local y axis.
 #[unsafe(no_mangle)]
@@ -75,6 +75,7 @@ pub extern "C" fn state() -> *const f32 {
             Shape::Plane => (pos, rot, 0.0, Vec3::ZERO),
             Shape::Sphere(r) => (pos, rot, 1.0, Vec3::splat(r)),
             Shape::Box(h) => (pos, rot, 2.0, h),
+            Shape::Capsule(r, half) => (pos, rot, 4.0, Vec3::new(r, half, r)),
         };
         let mut draw: Vec<_> = w
             .bodies
@@ -239,7 +240,7 @@ pub extern "C" fn drive(throttle: f64, steer: f64) {
 
 /// Car scene readout: `[speed km/h, sideways acceleration in g, body roll in degrees,
 /// front tyre slip angle in degrees, 1 if on autopilot, 1 if slowing for a pedestrian,
-/// brake pedal 0..1]`.
+/// brake pedal 0..1, gear (-1 reverse), engine rpm]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn car(field: u32) -> f64 {
     with(|s| {
@@ -262,7 +263,9 @@ pub extern "C" fn car(field: u32) -> f64 {
             }
             4 => car.autopilot.is_some() as u8 as f64,
             5 => car.yielding as u8 as f64,
-            _ => car.brake,
+            6 => car.brake,
+            7 => car.gear as f64,
+            _ => car.rpm,
         }
     })
 }

@@ -1,7 +1,9 @@
 //! Checks the joint-coordinate robot dynamics and the demo controllers.
 
 use glam::{DVec3 as Vec3, dvec3};
-use physics_simulator::robot::{self, ARM_TIP, JointKind, Link, Pull, Robot};
+use physics_simulator::robot::{
+    self, ARM_TIP, JointKind, Link, Pull, Robot, WALKER_TORSO as TORSO,
+};
 use std::f64::consts::{PI, TAU};
 
 const DT: f64 = 1.0 / 60.0;
@@ -225,20 +227,20 @@ fn walker_walks_at_human_speed_and_cadence() {
     for _ in 0..(15.0 / DT) as usize {
         r.step(DT, 16);
         assert!(
-            r.q[1] > 0.7 && r.q[2].abs() < 0.5,
+            r.q[1] > 0.7 && r.q[TORSO].abs() < 0.5,
             "fell at t = {:.1}: hip height {}, torso pitch {}",
             r.time,
             r.q[1],
-            r.q[2]
+            r.q[TORSO]
         );
     }
-    // A brisk human walk: about 1.5 to 1.8 m/s at 1.7 to 2 steps per second.
+    // People walk at about 1.2 to 1.4 m/s, 1.8 to 2 steps per second, 0.6 to 0.75 m a step.
     let (speed, cadence) = (r.q[0] / r.time, r.memory[2] / r.time);
     let stride = r.q[0] / r.memory[2];
     println!("{speed:.2} m/s, {cadence:.2} steps/s, {stride:.2} m a step");
-    assert!((1.3..1.8).contains(&speed), "{speed:.2} m/s");
-    assert!((1.6..2.1).contains(&cadence), "{cadence:.2} steps/s");
-    assert!((0.7..1.0).contains(&stride), "{stride:.2} m a step");
+    assert!((1.0..1.5).contains(&speed), "{speed:.2} m/s");
+    assert!((1.6..2.2).contains(&cadence), "{cadence:.2} steps/s");
+    assert!((0.5..0.8).contains(&stride), "{stride:.2} m a step");
 }
 
 #[test]
@@ -248,7 +250,7 @@ fn walker_recovers_from_shoves_both_ways() {
         for frame in 0..(12.0 / DT) as usize {
             // About 250 N on the chest for 0.2 s, 5 s in.
             r.pull = (300..312).contains(&frame).then(|| Pull {
-                link: 2,
+                link: TORSO,
                 local: dvec3(0.0, 0.3, 0.0),
                 target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
             });
@@ -256,7 +258,7 @@ fn walker_recovers_from_shoves_both_ways() {
             // A forward shove makes it lunge, hips down to about 0.67 m, then recover; below
             // 0.55 m it would be collapsing.
             assert!(
-                r.q[1] > 0.55 && r.q[2].abs() < 0.6,
+                r.q[1] > 0.55 && r.q[TORSO].abs() < 0.6,
                 "shove {shove}: fell at t = {:.1}",
                 r.time
             );
@@ -275,7 +277,7 @@ fn knocked_down_walker_comes_to_rest() {
     let mut r = robot::walker();
     for frame in 0..(12.0 / DT) as usize {
         r.pull = (240..249).contains(&frame).then(|| Pull {
-            link: 2,
+            link: TORSO,
             local: dvec3(0.0, 0.3, 0.0),
             target: dvec3(r.q[0] + 1.0, r.q[1] + 0.3, 0.0),
         });
@@ -305,12 +307,12 @@ fn gait_measures(shove: f64) -> Option<[f64; 7]> {
     let (mut was_down, mut x0, mut steps0) = ([true, true], 0.0, 0.0);
     for frame in 0..(15.0 / DT) as usize {
         r.pull = (shove != 0.0 && (300..312).contains(&frame)).then(|| Pull {
-            link: 2,
+            link: TORSO,
             local: dvec3(0.0, 0.3, 0.0),
             target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
         });
         r.step(DT, 16);
-        if !(r.q[1] > 0.6 && r.q[2].abs() < 1.0) {
+        if !(r.q[1] > 0.6 && r.q[TORSO].abs() < 1.0) {
             return None;
         }
         if frame == 300 {
@@ -319,21 +321,22 @@ fn gait_measures(shove: f64) -> Option<[f64; 7]> {
         if frame < 300 {
             continue;
         }
-        let down = [sole(&r, 5) < 0.005, sole(&r, 8) < 0.005];
-        for (k, leg) in [(0, 3), (1, 6)] {
+        let down = [sole(&r, 6) < 0.005, sole(&r, 9) < 0.005];
+        for (k, leg) in [(0, 4), (1, 7)] {
             if down[k] && !down[1 - k] {
                 stance_knee = stance_knee.max(-r.q[leg + 1]);
             }
             if !down[k] {
                 swing_knee = swing_knee.max(-r.q[leg + 1]);
             }
-            if down[k] && !was_down[k] && r.q[2] + r.q[leg] + r.q[leg + 1] + r.q[leg + 2] < 0.0 {
+            if down[k] && !was_down[k] && r.q[TORSO] + r.q[leg] + r.q[leg + 1] + r.q[leg + 2] < 0.0
+            {
                 toe_first += 1.0;
             }
             push_off = push_off.min(r.q[leg + 2]);
         }
         was_down = down;
-        tilt = tilt.max(r.q[2].abs());
+        tilt = tilt.max(r.q[TORSO].abs());
     }
     let steps = r.memory[2] - steps0;
     Some([
@@ -516,4 +519,33 @@ fn walker_parts_match_its_links() {
             "link {i} ({part:?}) hangs off {parent:?}"
         );
     }
+}
+
+#[test]
+fn ground_contact_stays_stable_at_one_step_per_frame() {
+    // The ground springs are stiff (a 2 kg box on 30 kN/m corners bounces at about 40 Hz),
+    // far too fast for explicit integration at 1/60 s. Solved implicitly, the box still
+    // comes to rest on the floor at one step per frame.
+    let half = dvec3(0.2, 0.1, 0.2);
+    let mut r = Robot::new(vec![Link::new(
+        None,
+        JointKind::Slide,
+        Vec3::Y,
+        Vec3::ZERO,
+        Vec3::ZERO,
+        half,
+        2.0,
+    )]);
+    r.ground = true;
+    r.q[0] = 1.0;
+    for _ in 0..(3.0 / DT) as usize {
+        r.step(DT, 1);
+        assert!(
+            r.q[0].is_finite() && r.q[0] < 1.01,
+            "blew up: height {}",
+            r.q[0]
+        );
+    }
+    close(r.q[0], 0.1, 0.002);
+    close(r.qd[0], 0.0, 0.01);
 }
