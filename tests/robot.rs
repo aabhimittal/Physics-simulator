@@ -488,3 +488,32 @@ fn walker_steps_evenly() {
         );
     }
 }
+
+#[test]
+fn walker_parts_match_its_links() {
+    // The page draws each link by its listed part, so the list must follow the links:
+    // same length, and every part attached to the part it belongs on.
+    use robot::Part::*;
+    let r = robot::walker();
+    let parts = robot::WALKER_PARTS;
+    assert_eq!(parts.len(), r.links.len());
+    for (i, (part, link)) in parts.iter().zip(&r.links).enumerate() {
+        let parent = link.parent.map(|p| parts[p]);
+        let expected = match part {
+            Hidden => {
+                assert_eq!(link.mass, 0.0, "link {i} is hidden but has mass");
+                continue;
+            }
+            Torso => Hidden,
+            Thigh | UpperArm => Torso,
+            Shin => Thigh,
+            Foot => Shin,
+            Forearm => UpperArm,
+        };
+        assert_eq!(
+            parent,
+            Some(expected),
+            "link {i} ({part:?}) hangs off {parent:?}"
+        );
+    }
+}

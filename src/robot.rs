@@ -749,6 +749,28 @@ pub fn walker() -> Robot {
     r
 }
 
+/// What each of the walker's links is, in link order, so the page can draw it as a person.
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u32)]
+pub enum Part {
+    /// Not drawn: the massless joints that let the body move and turn in the plane.
+    Hidden,
+    Torso,
+    Thigh,
+    Shin,
+    Foot,
+    UpperArm,
+    Forearm,
+}
+
+pub const WALKER_PARTS: [Part; 13] = {
+    use Part::*;
+    [
+        Hidden, Hidden, Torso, Thigh, Shin, Foot, Thigh, Shin, Foot, UpperArm, Forearm, UpperArm,
+        Forearm,
+    ]
+};
+
 /// Hip to sole when standing straight.
 const WALKER_LEG: f64 = 0.44 + 0.42 + 0.075;
 

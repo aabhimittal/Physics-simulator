@@ -1,0 +1,40 @@
+# Checks every pull request and every push to main: formatting, the Rust and Python tests,
+# that the browser simulation still builds, and that a pull request changing simulation
+# code also updates the committed web/sim.wasm.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the sim.wasm check compares against the base branch
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo fmt --check
+      - run: cargo test --release
+      - name: Python tests
+        run: cargo build --release && python3 -m unittest discover python
+      - name: Build the browser simulation
+        run: cargo build --release --target wasm32-unknown-unknown
+      # A byte-for-byte comparison would fail spuriously: Rust builds embed file paths that
+      # differ between machines. So check the next best thing: simulation code changed means
+      # sim.wasm must have changed too. (The live site is built from source either way.)
+      - name: web/sim.wasm rebuilt if simulation code changed
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          changed=$(git diff --name-only "origin/$BASE...HEAD")
+          if echo "$changed" | grep -v '^src/capi.rs$' | grep -qE '^(src/|Cargo\.(toml|lock)$)' && ! echo "$changed" | grep -qx 'web/sim.wasm'; then
+            echo "::error file=web/sim.wasm::Simulation code changed but web/sim.wasm was not rebuilt. Run: cargo build --release --target wasm32-unknown-unknown && cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm"
+            exit 1
+          fi
