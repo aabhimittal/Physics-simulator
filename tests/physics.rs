@@ -180,3 +180,57 @@ fn only_the_middle_axis_spin_flips() {
     close(w.energy(), e0, e0 * 1e-3);
     close(momentum(&w.bodies[2]).distance(l0), 0.0, l0.length() * 1e-3);
 }
+
+/// A capsule of radius 0.15 m and length 2 m (between the cap centres) lying along x at `at`.
+fn log(at: Vec3) -> Body {
+    let mut b = Body::new(Shape::Capsule(0.15, 1.0), 500.0, at);
+    b.rot = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2);
+    b
+}
+
+#[test]
+fn capsules_rest_on_the_ground_on_a_box_and_on_each_other() {
+    let mut w = World::default();
+    let on_ground = w.add(log(dvec3(0.0, 1.0, 0.0)));
+    let crate_ = w.add(Body::new(
+        Shape::Box(Vec3::splat(0.5)),
+        0.0,
+        dvec3(5.0, 0.5, 0.0),
+    ));
+    let on_box = w.add(log(dvec3(5.0, 1.6, 0.0)));
+    // The second log crosses the first, turned 90° about the vertical.
+    let mut across = log(dvec3(0.0, 1.5, 0.0));
+    across.rot = glam::DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2);
+    let on_log = w.add(across);
+    run(&mut w, 4.0);
+    let b = &w.bodies;
+    close(b[on_ground].pos.y, 0.15, 0.01);
+    close(b[on_box].pos.y, b[crate_].pos.y + 0.5 + 0.15, 0.01);
+    close(b[on_log].pos.y, 0.45, 0.02);
+    for i in [on_ground, on_box, on_log] {
+        assert!(
+            (b[i].rot * Vec3::Y).y.abs() < 0.05,
+            "log {i} is not lying flat"
+        );
+        assert!(b[i].vel.length() < 0.05, "log {i} still moving");
+    }
+}
+
+#[test]
+fn ray_down_onto_a_lying_capsule_hits_its_top() {
+    let mut w = World::default();
+    let l = w.add(log(dvec3(0.0, 0.15, 0.0)));
+    for x in [-1.0, 0.0, 0.7] {
+        let hit =
+            physics_simulator::raycast(&w.bodies, dvec3(x, 2.0, 0.0), -Vec3::Y, 5.0, usize::MAX)
+                .unwrap();
+        assert_eq!(hit.body, l);
+        close(hit.distance, 2.0 - 0.3, 1e-9);
+        close(hit.normal.y, 1.0, 1e-9);
+    }
+    // Past the round end it misses the capsule and finds the ground.
+    let hit =
+        physics_simulator::raycast(&w.bodies, dvec3(1.3, 2.0, 0.0), -Vec3::Y, 5.0, usize::MAX)
+            .unwrap();
+    assert_eq!(hit.body, 0);
+}

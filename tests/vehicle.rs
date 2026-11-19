@@ -1,8 +1,9 @@
 //! Checks the car against textbook vehicle dynamics.
 
 use glam::DVec3 as Vec3;
-use physics_simulator::World;
 use physics_simulator::scenes::{self, CAR_SCENE};
+use physics_simulator::vehicle::Car;
+use physics_simulator::{Body, Shape, World};
 
 const DT: f64 = 1.0 / 60.0;
 
@@ -107,6 +108,9 @@ fn autopilot_corners_on_its_circle_with_the_right_sideways_acceleration() {
                 car.roll(b).abs() > 0.02,
                 "no body roll in a {expected:.1} m/s² corner"
             );
+            // Anti-roll bars keep it under 4°, about what a real small car leans at 0.7 g.
+            let roll = car.roll(b).abs().to_degrees();
+            assert!(roll < 4.0, "{roll:.1}° of body roll");
         }
     }
 }
@@ -144,5 +148,152 @@ fn car_stops_for_people_crossing_and_drives_on() {
     assert!(
         driven > 250.0,
         "the car only drove {driven:.0} m in a minute"
+    );
+}
+
+#[test]
+fn gearbox_shifts_up_as_the_car_speeds_up() {
+    let mut w = car_at(0.0);
+    let mut gears = vec![1];
+    while w.bodies[1].vel.x < 120.0 / 3.6 {
+        w.cars[0].throttle = 1.0;
+        w.step(DT);
+        let car = &w.cars[0];
+        if car.gear != *gears.last().unwrap() {
+            gears.push(car.gear);
+        }
+        assert!(
+            car.rpm <= 6900.0,
+            "engine at {:.0} rpm, past the limiter",
+            car.rpm
+        );
+        assert!(
+            car.time < 30.0,
+            "only {:.0} km/h after 30 s",
+            w.bodies[1].vel.x * 3.6
+        );
+    }
+    // One gear at a time, upward only, and well into the box by 120 km/h.
+    assert!(
+        gears.windows(2).all(|g| g[1] == g[0] + 1),
+        "shifted {gears:?}"
+    );
+    assert!(
+        *gears.last().unwrap() >= 3,
+        "still in gear {} at 120 km/h",
+        gears.last().unwrap()
+    );
+}
+
+#[test]
+fn a_wheel_on_a_block_stands_on_it() {
+    // A 10 cm block under the front left wheel: that wheel's ray finds the block, the
+    // others the ground, and the body leans away from the block's corner.
+    let mut w = car_at(0.0);
+    let block = w.add(Body::new(
+        Shape::Box(Vec3::new(0.3, 0.05, 0.3)),
+        0.0,
+        Vec3::new(1.35, 0.05, 30.8),
+    ));
+    for _ in 0..(3.0 / DT) as usize {
+        w.step(DT);
+    }
+    let (car, b) = (&w.cars[0], &w.bodies[1]);
+    assert_eq!(car.wheels[0].ground, Some(block));
+    assert!(car.wheels[1..].iter().all(|wheel| wheel.ground == Some(0)));
+    let up = b.rot * Vec3::Y;
+    assert!(
+        up.x < -0.005 && up.z < -0.005,
+        "body not tilted away from the block: up = {up:?}"
+    );
+    assert!(b.vel.length() < 0.05, "not at rest on the block");
+}
+
+#[test]
+fn car_drives_up_a_ramp_jumps_off_and_lands_upright() {
+    // A 4 m ramp rising to 0.6 m (8.6°) across the car's path.
+    let mut w = car_at(8.0);
+    let mut ramp = Body::new(
+        Shape::Box(Vec3::new(2.0, 0.3, 1.5)),
+        0.0,
+        Vec3::new(10.0, 0.0, 30.0),
+    );
+    ramp.rot = glam::DQuat::from_rotation_z(0.15);
+    w.add(ramp);
+    let (mut highest, mut airborne) = (0f64, false);
+    for _ in 0..(6.0 / DT) as usize {
+        w.cars[0].throttle = 0.3;
+        w.step(DT);
+        highest = highest.max(w.bodies[1].pos.y);
+        airborne |= w.cars[0].wheels.iter().all(|wheel| wheel.load == 0.0);
+    }
+    let (car, b) = (&w.cars[0], &w.bodies[1]);
+    assert!(
+        highest > Car::RIDE_HEIGHT + 0.5,
+        "only rose to {highest:.2} m"
+    );
+    assert!(airborne, "never left the ground off the end of the ramp");
+    assert!(
+        b.pos.x > 25.0 && b.vel.x > 3.0,
+        "stopped at x = {:.1}",
+        b.pos.x
+    );
+    let upright = (b.rot * Vec3::Y).y;
+    assert!(
+        upright > 0.99 && car.wheels.iter().all(|wheel| wheel.ground == Some(0)),
+        "did not land on its wheels: up.y {upright:.3}"
+    );
+}
+
+/// Brakes failed: no autopilot, coasting at 8 m/s down the road (along -z at x = 30) for 3 s,
+/// with the walker starting at `person_x`. Returns the car's final speed, the person's
+/// fastest speed along the car's way, and how far they were carried.
+fn coast_into_person(person_x: f64) -> (f64, f64, f64) {
+    let (mut w, mut walker) = scenes::crossing();
+    let car = &mut w.cars[0];
+    car.autopilot = None;
+    for wheel in &mut car.wheels {
+        wheel.spin = 8.0 / 0.33;
+    }
+    let b = &mut w.bodies[1];
+    let ahead = glam::DQuat::from_rotation_y(std::f64::consts::FRAC_PI_2);
+    (b.pos, b.rot, b.vel) = (
+        Vec3::new(30.0, b.pos.y, 12.0),
+        ahead,
+        Vec3::new(0.0, 0.0, -8.0),
+    );
+    walker.q[0] = person_x;
+    let mut fastest = 0f64;
+    for _ in 0..(3.0 / DT) as usize {
+        scenes::step_crossing(&mut w, &mut walker, DT);
+        assert!(
+            walker.q.iter().chain(&walker.qd).all(|v| v.is_finite()),
+            "the person's state blew up"
+        );
+        fastest = fastest.max(-walker.qd[2]);
+    }
+    (-w.bodies[1].vel.z, fastest, -walker.q[2])
+}
+
+#[test]
+fn a_car_that_does_not_stop_hits_the_person_and_both_feel_it() {
+    let (missed, _, _) = coast_into_person(100.0); // nobody in the road: drag and rolling only
+    let (hit, thrown, carried) = coast_into_person(29.6);
+    println!(
+        "car ends at {hit:.2} m/s (at {missed:.2} with nobody there); person thrown at up to {thrown:.1} m/s, carried {carried:.1} m"
+    );
+    // The person is knocked along the car's way, about as fast as the car was going.
+    assert!(
+        thrown > 4.0 && thrown < 12.0,
+        "person thrown at {thrown:.1} m/s"
+    );
+    assert!(carried > 2.0, "person only moved {carried:.1} m");
+    // And the car pays for it: the momentum it lost beyond coasting went into the person
+    // (some of it on into the ground, through the person's feet).
+    let lost = 1200.0 * (missed - hit);
+    assert!(
+        lost > 70.0 * thrown * 0.7,
+        "car lost only {lost:.0} kg·m/s to a {:.0} kg·m/s throw",
+        70.0 * thrown
     );
 }

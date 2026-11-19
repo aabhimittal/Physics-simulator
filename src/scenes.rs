@@ -176,6 +176,31 @@ pub fn load(id: u32) -> World {
                     ));
                 }
             }
+            // A speed hump across the road, 8 cm high, which the autopilot crosses every lap,
+            // and a ramp inside the circle to drive up by hand. Both are static boxes; the
+            // wheels' rays find them like any other surface.
+            w.add(Body::new(
+                Shape::Box(Vec3::new(0.6, 0.06, 3.5)),
+                0.0,
+                Vec3::new(0.0, 0.02, -30.0),
+            ));
+            let mut ramp = Body::new(
+                Shape::Box(Vec3::new(2.0, 0.3, 1.5)),
+                0.0,
+                Vec3::new(-12.0, 0.0, 6.0),
+            );
+            ramp.rot = Quat::from_rotation_z(0.15);
+            w.add(ramp);
+            // Logs (capsules, 40 kg) to drive into or over.
+            for k in 0..3 {
+                let mut log = Body::new(
+                    Shape::Capsule(0.15, 1.2),
+                    230.0,
+                    Vec3::new(-6.0 + 1.0 * k as f64, 0.15, -8.0),
+                );
+                log.rot = Quat::from_rotation_x(std::f64::consts::FRAC_PI_2);
+                w.add(log);
+            }
         }
         // Tennis racket theorem, in zero gravity: spin about the smallest and largest
         // inertia axes is stable, spin about the middle one flips over and over.
@@ -207,6 +232,7 @@ const KERB: f64 = 24.5;
 pub fn crossing() -> (World, Robot) {
     let mut w = load(CAR_SCENE);
     w.bodies.truncate(2); // ground and car
+    w.substeps = 2; // per step of `step_crossing`, which takes 16 steps a frame
     (w, walker_at_kerb())
 }
 
@@ -219,9 +245,17 @@ fn walker_at_kerb() -> Robot {
 /// Advances the crossing scene one frame. Once across, the person is replaced by a new one
 /// at the kerb, so someone is always about to cross.
 pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
-    w.cars[0].pedestrian = Some((Vec3::X * walker.q[0], Vec3::X * walker.qd[0]));
-    walker.step(dt, 16);
-    w.step(dt);
+    // The walker's slides: x along its path, z sideways.
+    let at = |v: &[f64]| Vec3::new(v[0], 0.0, v[2]);
+    w.cars[0].pedestrian = Some((at(&walker.q), at(&walker.qd)));
+    // The two simulators advance together in short steps, with contact forces between them
+    // worked out afresh each time, so the person and the car can collide.
+    let steps = 16;
+    for _ in 0..steps {
+        walker.touch(&mut w.bodies, dt / steps as f64);
+        walker.step(dt / steps as f64, 1);
+        w.step(dt / steps as f64);
+    }
     if walker.q[0] > KERB + 13.0 {
         *walker = walker_at_kerb();
     }

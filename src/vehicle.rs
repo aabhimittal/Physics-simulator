@@ -10,7 +10,7 @@
 //! why the brakes have ABS. Both directions together are capped by the friction
 //! circle, |F| ≤ μ·load.
 
-use crate::{Body, Quat, Vec3};
+use crate::{Body, Quat, Vec3, raycast};
 
 const RADIUS: f64 = 0.33;
 /// Suspension length (mount to wheel centre) with no load, and how far it can compress.
@@ -26,10 +26,30 @@ const SAG: f64 = 1200.0 * 9.81 / 4.0 / SPRING;
 const WHEEL_INERTIA: f64 = 1.2;
 /// Tyre-road friction coefficient (dry asphalt).
 const GRIP: f64 = 1.0;
-/// Total torque at the driven (rear) wheels in first gear, and the engine's power.
-/// Above about 67 km/h (power / full-torque force) the power limit takes over, as with a real engine and gearbox.
-const ENGINE_TORQUE: f64 = 1_600.0;
-const ENGINE_POWER: f64 = 90_000.0;
+/// Engine torque (N·m) against speed (rpm): 175 N·m at 4500 rpm, about 90 kW at 6000.
+/// Between points it is linear; past the last one the rev limiter cuts the fuel.
+const TORQUE_CURVE: [(f64, f64); 5] = [
+    (1000.0, 120.0),
+    (2500.0, 160.0),
+    (4500.0, 175.0),
+    (6000.0, 150.0),
+    (6800.0, 130.0),
+];
+/// A five-speed gearbox, its reverse gear, the final drive and the drivetrain's efficiency.
+const GEARS: [f64; 5] = [3.6, 2.2, 1.5, 1.15, 0.9];
+const REVERSE: f64 = 3.3;
+const FINAL_DRIVE: f64 = 3.9;
+const DRIVETRAIN: f64 = 0.9;
+/// Automatic shifting: up near the red line, down when the engine would lug; drive is cut
+/// for this long while a gear changes.
+const SHIFT_UP_RPM: f64 = 6200.0;
+const SHIFT_DOWN_RPM: f64 = 2500.0;
+const SHIFT_TIME: f64 = 0.25;
+/// Below this the clutch slips, so the engine never stalls (rpm).
+const IDLE_RPM: f64 = 1000.0;
+/// Anti-roll bars: extra spring force per metre of difference between the two wheels on an
+/// axle. They resist the body leaning without stiffening the ride over bumps that hit both.
+const ANTI_ROLL: [f64; 2] = [20_000.0, 10_000.0];
 /// Brake torque per wheel at full pedal, rear wheels 60% of it (front bias, as on real cars).
 const BRAKE_TORQUE: f64 = 1_800.0;
 /// ABS lets a wheel's brake off while it slips past the tyre's grip peak.
@@ -65,6 +85,8 @@ pub struct Wheel {
     pub steer: f64,
     /// Normal force on the tyre (N); 0 in the air.
     pub load: f64,
+    /// The body the tyre is on (0 is the ground), if it touches anything.
+    pub ground: Option<usize>,
     /// Wheel slip ratio and sideways slip angle (rad).
     pub slip: (f64, f64),
 }
@@ -87,6 +109,10 @@ pub struct Car {
     /// Acceleration of the body (m/s²), for display.
     pub accel: Vec3,
     last_vel: Vec3,
+    /// Gear (1 to 5, or -1 for reverse), engine speed (rpm), and time left in a gear change.
+    pub gear: i32,
+    pub rpm: f64,
+    shifting: f64,
 }
 
 impl Car {
@@ -100,6 +126,7 @@ impl Car {
             length: REST - SAG,
             steer: 0.0,
             load: 0.0,
+            ground: None,
             slip: (0.0, 0.0),
         };
         let x = WHEELBASE / 2.0;
@@ -120,23 +147,41 @@ impl Car {
             time: 0.0,
             accel: Vec3::ZERO,
             last_vel: Vec3::ZERO,
+            gear: 1,
+            rpm: IDLE_RPM,
+            shifting: 0.0,
         }
     }
 
     /// Height of the body's centre above flat ground at rest: each spring carries a quarter of the weight.
     pub const RIDE_HEIGHT: f64 = RADIUS + REST - SAG + 0.1;
 
-    /// Applies one substep of suspension, tyre, drive, brake and drag forces to `b`.
-    pub fn update(&mut self, b: &mut Body, h: f64) {
+    /// Applies one substep of suspension, tyre, drive, brake and drag forces to the car's
+    /// body, and the tyres' reactions to whatever they stand on.
+    pub fn update(&mut self, bodies: &mut [Body], h: f64) {
         self.time += h;
+        let me = self.body;
         if let Some(radius) = self.autopilot {
-            self.drive_round(b, radius);
+            self.drive_round(&bodies[me], radius);
         }
-        b.wake(); // a parked car must still respond to its driver
-        let speed = b.vel.length();
-        b.kick(Vec3::ZERO, b.vel * (-DRAG * speed * h));
+        bodies[me].wake(); // a parked car must still respond to its driver
+        let b = &bodies[me];
+        let mut impulses = vec![(me, b.pos, b.vel * (-DRAG * b.vel.length() * h))];
         let down = b.rot * Vec3::NEG_Y;
-        for w in &mut self.wheels {
+        // Each wheel's ray finds the nearest surface below it on any body: ground, kerb,
+        // ramp or crate. First every suspension length, as the anti-roll bars need both
+        // wheels of an axle; then the forces.
+        let hits: Vec<_> = self
+            .wheels
+            .iter()
+            .map(|w| raycast(bodies, b.pos + b.rot * w.mount, down, REST + RADIUS, me))
+            .collect();
+        let lengths: Vec<f64> = hits
+            .iter()
+            .map(|hit| hit.map_or(REST, |hit| (hit.distance - RADIUS).min(REST)))
+            .collect();
+        let drive = self.drive_torque(h);
+        for (k, w) in self.wheels.iter_mut().enumerate() {
             // Ackermann steering: each front wheel points at the same turning centre,
             // so the inner wheel turns more than the outer one.
             let t = self.steer.tan();
@@ -145,38 +190,33 @@ impl Car {
             } else {
                 0.0
             };
-            // shortcut: the ray only meets flat ground at y = 0; ray against the world's bodies for kerbs and ramps.
-            let p = b.pos + b.rot * w.mount;
-            let reach = if down.y < -0.2 {
-                p.y / -down.y
-            } else {
-                f64::INFINITY
-            };
-            let length = (reach - RADIUS).min(REST);
+            let length = lengths[k];
             let rate = (w.length - length) / h; // compression speed
             w.length = length;
-            let drive = if w.front {
-                0.0
-            } else {
-                // Open differential: each rear wheel gets half.
-                self.throttle * ENGINE_TORQUE.min(ENGINE_POWER / w.spin.abs().max(1.0)) / 2.0
-            };
+            let partner = REST - lengths[k ^ 1]; // the other wheel on the same axle
+            let drive = if w.front { 0.0 } else { drive / 2.0 }; // open differential
             let mut spin = w.spin;
             let mut slip = (0.0, 0.0);
             let compression = REST - length;
-            w.load = if compression > 0.0 {
-                let stop = (compression - TRAVEL).max(0.0) * BUMP_STOP;
-                (SPRING * compression + DAMPER * rate + stop).max(0.0)
-            } else {
-                0.0
+            w.ground = hits[k].map(|hit| hit.body);
+            w.load = match hits[k] {
+                Some(_) if compression > 0.0 => {
+                    let stop = (compression - TRAVEL).max(0.0) * BUMP_STOP;
+                    let bar = ANTI_ROLL[k / 2] * (compression - partner);
+                    (SPRING * compression + DAMPER * rate + stop + bar).max(0.0)
+                }
+                _ => 0.0,
             };
-            if w.load > 0.0 {
-                let contact = p + down * reach;
-                let v = b.point_vel(contact - b.pos);
-                let heading = (b.rot * Quat::from_rotation_y(w.steer) * Vec3::X)
-                    .with_y(0.0)
-                    .normalize_or_zero();
-                let side = heading.cross(Vec3::Y);
+            if let (Some(hit), true) = (hits[k], w.load > 0.0) {
+                let p = b.pos + b.rot * w.mount;
+                let contact = p + down * hit.distance;
+                let n = hit.normal;
+                // Relative to the surface, which may itself be moving (a crate).
+                let under = &bodies[hit.body];
+                let v = b.point_vel(contact - b.pos) - under.point_vel(contact - under.pos);
+                let heading = b.rot * Quat::from_rotation_y(w.steer) * Vec3::X;
+                let heading = (heading - n * heading.dot(n)).normalize_or_zero();
+                let side = heading.cross(n);
                 let (along, across) = (v.dot(heading), v.dot(side));
                 let scale = along.abs().max(SLOW);
                 let peak = GRIP * w.load;
@@ -196,7 +236,9 @@ impl Car {
                 let tyre = (heading * long + side * lat).clamp_length_max(peak);
                 // Applied at the contact patch, not the hub: the difference is the drive and
                 // brake torque, which reacts on the body through the engine and brake mounts.
-                b.kick(contact - b.pos, (Vec3::Y * w.load + tyre) * h);
+                let force = (n * w.load + tyre) * h;
+                impulses.push((me, contact, force));
+                impulses.push((hit.body, contact, -force));
             } else {
                 spin += h * drive / WHEEL_INERTIA;
             }
@@ -208,10 +250,52 @@ impl Car {
             w.roll += w.spin * h;
             w.slip = slip;
         }
+        for (i, at, impulse) in impulses {
+            let body = &mut bodies[i];
+            if i != me && impulse.length_squared() > 0.0 {
+                body.wake(); // a crate under a wheel must feel it
+            }
+            let r = at - body.pos;
+            body.kick(r, impulse);
+        }
         // Smoothed over about 0.1 s, so the readout shows the motion rather than the suspension buzz.
+        let b = &bodies[me];
         let a = (b.vel - self.last_vel) / h;
         self.accel += (a - self.accel) * (h / 0.1).min(1.0);
         self.last_vel = b.vel;
+    }
+
+    /// Torque at the driven axle from the engine through the gearbox, which shifts itself.
+    fn drive_torque(&mut self, h: f64) -> f64 {
+        let reverse = self.throttle < 0.0;
+        if reverse != (self.gear < 0) {
+            self.gear = if reverse { -1 } else { 1 };
+        }
+        let ratio = |gear: i32| {
+            FINAL_DRIVE
+                * if gear < 0 {
+                    REVERSE
+                } else {
+                    GEARS[gear as usize - 1]
+                }
+        };
+        let wheel = (self.wheels[2].spin + self.wheels[3].spin).abs() / 2.0;
+        let to_rpm = 60.0 / std::f64::consts::TAU;
+        self.rpm = (wheel * ratio(self.gear) * to_rpm).max(IDLE_RPM);
+        self.shifting = (self.shifting - h).max(0.0);
+        if self.gear > 0 && self.shifting == 0.0 {
+            let up = self.rpm > SHIFT_UP_RPM && (self.gear as usize) < GEARS.len();
+            let down = self.rpm < SHIFT_DOWN_RPM && self.gear > 1;
+            if up || down {
+                self.gear += if up { 1 } else { -1 };
+                self.shifting = SHIFT_TIME;
+            }
+        }
+        if self.shifting > 0.0 {
+            return 0.0;
+        }
+        let torque = engine_torque(self.rpm);
+        self.throttle * torque * ratio(self.gear) * DRIVETRAIN
     }
 
     /// Autopilot: pure-pursuit steering toward a point a little way ahead on the circle,
@@ -285,4 +369,15 @@ impl Car {
     }
 
     pub const WHEEL_SIZE: (f64, f64) = (RADIUS, 0.11);
+}
+
+/// Engine torque at `rpm`, from `TORQUE_CURVE`; none past the rev limiter.
+fn engine_torque(rpm: f64) -> f64 {
+    let c = TORQUE_CURVE;
+    if rpm > c[c.len() - 1].0 {
+        return 0.0;
+    }
+    let i = c.iter().position(|&(r, _)| r >= rpm).unwrap_or(0).max(1);
+    let ((r0, t0), (r1, t1)) = (c[i - 1], c[i]);
+    t0 + (t1 - t0) * ((rpm - r0) / (r1 - r0)).clamp(0.0, 1.0)
 }

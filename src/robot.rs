@@ -6,7 +6,8 @@
 //! The mass matrix, gravity and Coriolis forces, and the effect of a force
 //! applied at any point all fall out of calling it with different inputs.
 
-use crate::{Quat, Shape, Vec3};
+use crate::collide::{inside_box, penetration};
+use crate::{Body, Quat, Shape, Vec3};
 use std::cell::Cell;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -119,6 +120,9 @@ pub struct Robot {
     pub pull: Option<Pull>,
     /// Whether the links collide with the floor at y = 0.
     pub ground: bool,
+    /// Forces on the links from outside (contact with world bodies, see `touch`), held for
+    /// the next step.
+    pub external: Vec<Push>,
 }
 
 impl Robot {
@@ -136,6 +140,7 @@ impl Robot {
             memory: [0.0, 0.0, 0.0, f64::INFINITY],
             pull: None,
             ground: false,
+            external: Vec::new(),
         }
     }
 
@@ -260,7 +265,20 @@ impl Robot {
     ///
     /// Also returns, per joint, how fast its own joint force falls with joint speed and
     /// with joint position (damping and stiffness), so `step` can treat those implicitly.
-    fn applied(&self, q: &[f64], qd: &[f64]) -> (Vec<f64>, Vec<(f64, f64)>, Vec<Push>) {
+    ///
+    /// Last, the ground contacts (link, point, and whether friction is holding rather than
+    /// sliding), whose springs `accelerations_over` also treats implicitly.
+    #[allow(clippy::type_complexity)]
+    fn applied(
+        &self,
+        q: &[f64],
+        qd: &[f64],
+    ) -> (
+        Vec<f64>,
+        Vec<(f64, f64)>,
+        Vec<Push>,
+        Vec<(usize, Vec3, bool)>,
+    ) {
         let (tau, stiff) = (0..q.len())
             .map(|i| {
                 let l = &self.links[i];
@@ -289,7 +307,7 @@ impl Robot {
             })
             .unzip();
         let frames = self.frames(q);
-        let mut pushes = Vec::new();
+        let (mut pushes, mut contacts) = (self.external.clone(), Vec::new());
         if let Some(p) = self.pull {
             let (o, rot) = frames[p.link];
             let at = o + rot * p.local;
@@ -303,8 +321,7 @@ impl Robot {
         if self.ground {
             // Soft contact with the floor at y = 0: every box corner below it is pushed
             // up by a damped spring and held sideways by friction, up to the Coulomb limit.
-            // shortcut: explicit penalty springs need small time steps; an implicit or
-            // constraint-based contact solver (as in MuJoCo) is the upgrade for stiff contact.
+            // The springs are stiff, so `accelerations_over` treats them implicitly.
             let vel = self.velocities(&frames, qd);
             for (link, l) in self.links.iter().enumerate() {
                 for k in 0..8 {
@@ -324,10 +341,31 @@ impl Robot {
                         at,
                         force: Vec3::Y * normal + grip,
                     });
+                    if normal > 0.0 {
+                        let holding = GROUND_GRIP * slide.length() < GROUND_FRICTION * normal;
+                        contacts.push((link, at, holding));
+                    }
                 }
             }
         }
-        (tau, stiff, pushes)
+        (tau, stiff, pushes, contacts)
+    }
+
+    /// How fast world point `at`, fixed to link `link`, moves per unit speed of each joint:
+    /// one column per joint, zero for joints not between the link and the world.
+    fn point_jacobian(&self, frames: &[(Vec3, Quat)], link: usize, at: Vec3) -> Vec<Vec3> {
+        let mut columns = vec![Vec3::ZERO; self.links.len()];
+        let mut joint = Some(link);
+        while let Some(k) = joint {
+            let l = &self.links[k];
+            let axis = frames[k].1 * l.axis;
+            columns[k] = match l.kind {
+                JointKind::Hinge => axis.cross(at - frames[k].0),
+                JointKind::Slide => axis,
+            };
+            joint = l.parent;
+        }
+        columns
     }
 
     /// Forward dynamics: solves `M qdd = applied - bias` for the accelerations.
@@ -342,11 +380,28 @@ impl Robot {
     /// nowhere: a fallen walker sliding faster and faster along the floor.
     fn accelerations_over(&self, q: &[f64], qd: &[f64], h: f64) -> Vec<f64> {
         let n = q.len();
-        let (tau, stiff, pushes) = self.applied(q, qd);
+        let (tau, stiff, pushes, contacts) = self.applied(q, qd);
         let bias = self.inverse_dynamics(q, qd, &vec![0.0; n], self.gravity, &pushes);
         let mut m = self.mass_matrix(q);
         for (i, (damping, stiffness)) in stiff.into_iter().enumerate() {
             m[i][i] += h * damping + h * h * stiffness;
+        }
+        // The ground springs too: a contact force F = -K·x - C·v at a point that moves
+        // J·q̇ adds Jᵀ(h·C + h²·K)J. The normal spring and damper act along y; friction, while
+        // it holds, is a damper in x and z. That keeps contact stable at large time steps.
+        if !contacts.is_empty() {
+            let frames = self.frames(q);
+            for (link, at, holding) in contacts {
+                let j = self.point_jacobian(&frames, link, at);
+                let normal = h * GROUND_DAMPING + h * h * GROUND_STIFFNESS;
+                let grip = if holding { h * GROUND_GRIP } else { 0.0 };
+                for a in 0..n {
+                    for b in 0..n {
+                        m[a][b] +=
+                            normal * j[a].y * j[b].y + grip * (j[a].x * j[b].x + j[a].z * j[b].z);
+                    }
+                }
+            }
         }
         let mut x: Vec<f64> = (0..n).map(|i| tau[i] - bias[i]).collect();
         // Gaussian elimination. M is symmetric positive definite, so no pivoting is needed.
@@ -391,6 +446,62 @@ impl Robot {
                 self.qd[i] += h / 6.0 * (a1[i] + 2.0 * a2[i] + 2.0 * a3[i] + a4[i]);
             }
             self.time += h;
+        }
+    }
+
+    /// Contact between the links and the world's bodies (not the ground plane, which
+    /// `ground` covers): any link corner inside a body, and any box body's corner inside a
+    /// link, is pushed out by a damped spring with friction, like ground contact. Sets
+    /// `external` to the forces on the links and gives the bodies the opposite impulse over
+    /// a step of `h`, so momentum passes both ways.
+    pub fn touch(&mut self, bodies: &mut [Body], h: f64) {
+        let frames = self.frames(&self.q);
+        let vel = self.velocities(&frames, &self.qd);
+        let (mut on_links, mut on_bodies) = (Vec::new(), Vec::new());
+        for (link, l) in self.links.iter().enumerate() {
+            if l.mass == 0.0 {
+                continue;
+            }
+            let (o, rot) = frames[link];
+            let centre = o + rot * l.com;
+            for (i, b) in bodies.iter().enumerate() {
+                if matches!(b.shape, Shape::Plane)
+                    || centre.distance(b.pos) > l.half.length() + b.radius()
+                {
+                    continue;
+                }
+                // `out` is the way the link is pushed.
+                let mut press = |at: Vec3, depth: f64, out: Vec3| {
+                    let v = vel[link].1 + vel[link].0.cross(at - o) - b.point_vel(at - b.pos);
+                    let closing = v.dot(out);
+                    let normal = (TOUCH_STIFFNESS * depth - TOUCH_DAMPING * closing).max(0.0);
+                    let slide = v - out * closing;
+                    let grip = (slide * -TOUCH_GRIP).clamp_length_max(TOUCH_FRICTION * normal);
+                    let force = out * normal + grip;
+                    on_links.push(Push { link, at, force });
+                    on_bodies.push((i, at, -force * h));
+                };
+                for k in 0..8 {
+                    let corner = centre + rot * (l.half * corner_sign(k));
+                    if let Some((depth, out)) = penetration(b, corner) {
+                        press(corner, depth, out);
+                    }
+                }
+                if let Shape::Box(bh) = b.shape {
+                    for k in 0..8 {
+                        let corner = b.pos + b.rot * (bh * corner_sign(k));
+                        if let Some((depth, out)) = inside_box(centre, rot, l.half, corner) {
+                            press(corner, depth, -out);
+                        }
+                    }
+                }
+            }
+        }
+        self.external = on_links;
+        for (i, at, impulse) in on_bodies {
+            bodies[i].wake();
+            let r = at - bodies[i].pos;
+            bodies[i].kick(r, impulse);
         }
     }
 
@@ -656,7 +767,7 @@ pub fn walker() -> Robot {
     let free =
         |parent, kind, axis| Link::new(parent, kind, axis, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0);
     let torso = Link::new(
-        Some(1),
+        Some(2),
         JointKind::Hinge,
         Vec3::Z,
         Vec3::ZERO,
@@ -664,9 +775,12 @@ pub fn walker() -> Robot {
         Vec3::new(0.1, 0.32, 0.15),
         40.0,
     );
+    // The sideways slide lets a push from the side (a car) move the body; nothing balances
+    // it sideways, but nothing needs to: it can slide, not tip.
     let mut links = vec![
         free(None, JointKind::Slide, Vec3::X),
         free(Some(0), JointKind::Slide, Vec3::Y),
+        free(Some(1), JointKind::Slide, Vec3::Z),
         torso,
     ];
     for side in [1.0, -1.0] {
@@ -686,7 +800,7 @@ pub fn walker() -> Robot {
         };
         // The legs sit 0.1 m to either side; they move in the same plane.
         links.push(segment(
-            2,
+            WALKER_TORSO,
             Vec3::Z * (0.1 * side),
             Vec3::Y * -0.22,
             Vec3::new(0.06, 0.22, 0.06),
@@ -719,7 +833,7 @@ pub fn walker() -> Robot {
     for side in [1.0, -1.0] {
         let shoulder = links.len();
         let mut upper = Link::new(
-            Some(2),
+            Some(WALKER_TORSO),
             JointKind::Hinge,
             Vec3::Z,
             Vec3::new(0.0, 0.58, 0.2 * side),
@@ -763,13 +877,19 @@ pub enum Part {
     Forearm,
 }
 
-pub const WALKER_PARTS: [Part; 13] = {
+pub const WALKER_PARTS: [Part; 14] = {
     use Part::*;
     [
-        Hidden, Hidden, Torso, Thigh, Shin, Foot, Thigh, Shin, Foot, UpperArm, Forearm, UpperArm,
-        Forearm,
+        Hidden, Hidden, Hidden, Torso, Thigh, Shin, Foot, Thigh, Shin, Foot, UpperArm, Forearm,
+        UpperArm, Forearm,
     ]
 };
+
+/// The walker's joints: x, y and z slides (massless) carrying the torso, whose hinge is its
+/// pitch; then hip, knee and ankle for each leg, and shoulder and elbow for each arm.
+pub const WALKER_TORSO: usize = 3;
+pub const WALKER_HIPS: [usize; 2] = [4, 7];
+const SHOULDERS: [usize; 2] = [10, 12];
 
 /// Hip to sole when standing straight.
 const WALKER_LEG: f64 = 0.44 + 0.42 + 0.075;
@@ -784,7 +904,7 @@ fn walk(r: &mut Robot) {
     let g = GAIT.with(Cell::get);
     let [stance_side, step_start, steps, mut landing_start] = r.memory;
     let side = stance_side as usize;
-    let (stance, swing) = ([3, 6][side], [6, 3][side]);
+    let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
     let frames = r.frames(&r.q);
     let sole = |foot: usize| {
         let (o, rot) = frames[foot];
@@ -801,7 +921,7 @@ fn walk(r: &mut Robot) {
     // person reaches sooner when walking faster; a fixed time alone lets a fast body fall
     // past its stance foot with the other foot still in the air.
     if landing_start.is_infinite()
-        && (r.time - step_start > g.swing_time || r.q[2] + r.q[stance] < -STANCE_BEHIND)
+        && (r.time - step_start > g.swing_time || r.q[WALKER_TORSO] + r.q[stance] < -STANCE_BEHIND)
     {
         landing_start = r.time;
         r.memory[3] = r.time;
@@ -826,12 +946,12 @@ fn walk(r: &mut Robot) {
     // Muscles ramp rather than switch: the targets blend from one pose to the next over 0.1 s.
     let blend = smoothstep((r.time - landing_start) / 0.1);
     let target = g.swinging.mix(&g.landing, blend);
-    let pitch = r.q[2];
+    let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
     // Swing hip: aimed in the world frame, plus the balance feedback.
     let aim = target.swing_hip + g.distance_gain * (com.x - ankle.x) + g.speed_gain * com_vel.x;
-    let swing_hip = pd(pitch + r.q[swing], r.qd[2] + r.qd[swing], aim, 300.0);
-    let torso = pd(pitch, r.qd[2], g.lean, 600.0);
+    let swing_hip = pd(pitch + r.q[swing], pitch_rate + r.qd[swing], aim, 300.0);
+    let torso = pd(pitch, pitch_rate, g.lean, 600.0);
     let mut torque = vec![0.0; r.q.len()];
     torque[swing] = swing_hip;
     torque[stance] = -torso - swing_hip;
@@ -866,16 +986,16 @@ fn walk(r: &mut Robot) {
     );
     // Arms swing opposite to the leg on their own side, about as far as people's do, elbows
     // a little bent and bending more as the arm swings forward.
-    for (shoulder, hip) in [(9, 3), (11, 6)] {
+    for (shoulder, hip) in SHOULDERS.into_iter().zip(WALKER_HIPS) {
         let want = -0.6 * (pitch + r.q[hip]);
         torque[shoulder] = pd(r.q[shoulder], r.qd[shoulder], want, 60.0);
         let elbow = 0.3 + 0.4 * want.max(0.0);
         torque[shoulder + 1] = pd(r.q[shoulder + 1], r.qd[shoulder + 1], elbow, 30.0);
     }
-    for i in 3..r.q.len() {
+    for i in WALKER_TORSO + 1..r.q.len() {
         r.ctrl[i] = torque[i] / r.links[i].gear;
     }
-    r.target = Some(Vec3::new(com.x, 0.02, 0.0)); // drawn under the centre of mass
+    r.target = Some(Vec3::new(com.x, 0.02, com.z)); // drawn under the centre of mass
 }
 
 fn smoothstep(x: f64) -> f64 {
@@ -1003,3 +1123,15 @@ pub fn boxes(r: &Robot) -> Vec<(Vec3, Quat, Shape)> {
 
 const PUSH_GAIN: f64 = 1.0;
 const STANCE_BEHIND: f64 = 0.25;
+
+/// One of a box's eight corners, as a sign per axis.
+fn corner_sign(k: usize) -> Vec3 {
+    Vec3::new((k & 1) as f64, (k >> 1 & 1) as f64, (k >> 2) as f64) * 2.0 - 1.0
+}
+
+/// Robot-against-body contact (`Robot::touch`): spring and damper per point pressed in, and
+/// friction up to the Coulomb limit. The same as ground contact, a little less grippy.
+const TOUCH_STIFFNESS: f64 = 3.0e4;
+const TOUCH_DAMPING: f64 = 300.0;
+const TOUCH_GRIP: f64 = 2000.0;
+const TOUCH_FRICTION: f64 = 0.5;
