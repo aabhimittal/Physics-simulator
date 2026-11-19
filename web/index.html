@@ -81,6 +81,7 @@
   <div class="row">
     <span id="energy"></span>
     <button id="fire" type="button">Fire ball</button>
+    <button id="brakes" type="button" aria-pressed="false" hidden>Brakes fail</button>
     <button id="pause" type="button">Pause</button>
     <button id="reset" type="button">Reset</button>
   </div>
@@ -123,7 +124,7 @@ SCENES[12] = { name: 'Car', car: true, follow: 0, group: 1, view: [-0.5, 1.15, 1
 SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 3, person: true, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
   note: 'A 70 kg body with hip, knee and ankle motors about as strong as human muscle, and no animation: every step is physics. It balances the way people do, by stepping further ahead when it starts to fall forward. A small tug on the torso makes it stumble and recover; yank it and it falls (Reset stands it up again).' };
 SCENES[14] = { name: 'Crossing', robot: true, crossing: true, person: true, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
-  note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs.' };
+  note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs. Press Brakes fail to see what happens when it cannot stop: the two collide, and momentum passes between them.' };
 const DT = 1 / 60;
 const $ = id => document.getElementById(id);
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -318,6 +319,8 @@ function loadScene(id) {
   $('note').textContent = SCENES[id].note;
   [...$('scenes').children].forEach(b => b.setAttribute('aria-pressed', +b.dataset.id === id));
   $('fire').hidden = !!SCENES[id].robot; // robots have no contact yet
+  $('brakes').hidden = !SCENES[id].crossing; // loading the scene gives the car working brakes again
+  $('brakes').setAttribute('aria-pressed', 'false');
   road.visible = markings.visible = !!(SCENES[id].car || SCENES[id].crossing);
   zebra.visible = !!SCENES[id].crossing;
   tailLights = null;
@@ -379,7 +382,8 @@ function sync() {
     : SCENES[current].trained
     ? `Run ${run} · ${metres.toFixed(1)} m in ${seconds.toFixed(1)} s · ${(metres / Math.max(seconds, 0.5)).toFixed(1)} m/s average`
     : SCENES[current].crossing
-    ? `Car ${wasm.car(0).toFixed(0)} km/h · ${wasm.car(5) ? 'braking for the person crossing' : 'road clear, driving on'}`
+    ? `Car ${wasm.car(0).toFixed(0)} km/h · ${wasm.car(9) ? (wasm.car(5) ? 'BRAKES FAILED, coasting toward the person crossing' : 'brakes failed')
+      : wasm.car(5) ? 'braking for the person crossing' : 'road clear, driving on'}`
     : SCENES[current].walking
     ? `${wasm.walker(0).toFixed(2)} m/s average · ${wasm.walker(1)} steps · ${wasm.walker(2).toFixed(2)} steps a second`
     : SCENES[current].car
@@ -445,6 +449,11 @@ $('fire').onclick = () => {
   fire();
 };
 $('reset').onclick = () => loadScene(current);
+$('brakes').onclick = () => {
+  const failed = $('brakes').getAttribute('aria-pressed') !== 'true';
+  wasm.fail_brakes(failed ? 1 : 0);
+  $('brakes').setAttribute('aria-pressed', String(failed));
+};
 $('pause').onclick = () => {
   paused = !paused;
   $('pause').textContent = paused ? 'Play' : 'Pause';

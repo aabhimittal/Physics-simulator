@@ -297,3 +297,48 @@ fn a_car_that_does_not_stop_hits_the_person_and_both_feel_it() {
         70.0 * thrown
     );
 }
+
+#[test]
+fn with_its_brakes_failed_the_car_hits_the_person_crossing() {
+    // The same driver sees the person and lifts off, but cannot stop in time.
+    let (mut w, mut walker) = scenes::crossing_brakes_failed();
+    let mut impact = None;
+    for frame in 0..(10.0 / DT) as usize {
+        scenes::step_crossing(&mut w, &mut walker, DT);
+        assert!(
+            walker.q.iter().chain(&walker.qd).all(|v| v.is_finite()),
+            "the person's state blew up"
+        );
+        let speed = w.bodies[1].vel.length();
+        if impact.is_none() && walker.qd[2].abs() > 2.0 {
+            impact = Some((frame as f64 * DT, speed * 3.6));
+        }
+    }
+    let (at, kmh) = impact.expect("the car never hit the person");
+    println!("impact at {at:.1} s, car at {kmh:.0} km/h");
+    assert!(
+        kmh > 30.0,
+        "only {kmh:.0} km/h at impact: it nearly stopped"
+    );
+}
+
+#[test]
+fn the_driver_never_speeds_up_toward_someone_in_the_way() {
+    // The ordinary crossing starts the car slow (8 m/s), below its cruising speed: once it
+    // has seen the person it must lift off, not keep accelerating up to its braking limit.
+    let (mut w, mut walker) = scenes::crossing();
+    let (mut seen_at, mut fastest_after) = (None, 0f64);
+    for _ in 0..(4.0 / DT) as usize {
+        scenes::step_crossing(&mut w, &mut walker, DT);
+        let speed = w.bodies[1].vel.length();
+        if w.cars[0].yielding {
+            seen_at.get_or_insert(speed);
+            fastest_after = fastest_after.max(speed);
+        }
+    }
+    let seen_at = seen_at.expect("the driver never saw the person");
+    assert!(
+        fastest_after < seen_at + 0.05,
+        "sped up from {seen_at:.2} to {fastest_after:.2} m/s toward someone in its way"
+    );
+}

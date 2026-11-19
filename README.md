@@ -215,7 +215,15 @@ autopilot is given the person's position and velocity, like a driver's eyes. Any
 its speed at √(2·a·d), the most from which braking at a = 6 m/s² still stops it in the
 distance d left, aiming to stop with its nose 4 m short. It waits while they cross, then
 drives on; a new person steps off the kerb each time. `tests/vehicle.rs` runs a minute
-of it: several stops, never closer than 5.9 m centre to person.
+of it: several stops, never closer than 5.9 m centre to person. The driver never speeds up
+toward someone in the way; it lifts off and lets the brakes do the rest.
+
+The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene with the
+brake pedal doing nothing, the car placed 155° back round the road at 50 km/h so it arrives
+just as the person is in its lane. The driver still sees them and lifts off, but coasting
+cannot stop it: it strikes them at about 47 km/h and slows as it passes them momentum. The
+timing is staged (starts from 140° to 170° back all lead to an impact); what follows is
+not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
 Limits: a wheel is a single ray, so it meets a kerb's edge by snapping up onto it rather
 than rolling over the corner (a shape cast is the upgrade); the gearbox is automatic only.

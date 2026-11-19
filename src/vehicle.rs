@@ -105,6 +105,9 @@ pub struct Car {
     /// for one; and whether it is slowing down for them right now.
     pub pedestrian: Option<(Vec3, Vec3)>,
     pub yielding: bool,
+    /// The brakes have failed: the pedal does nothing, and only drag and rolling resistance
+    /// slow the car.
+    pub brakes_failed: bool,
     pub time: f64,
     /// Acceleration of the body (m/s²), for display.
     pub accel: Vec3,
@@ -144,6 +147,7 @@ impl Car {
             autopilot: None,
             pedestrian: None,
             yielding: false,
+            brakes_failed: false,
             time: 0.0,
             accel: Vec3::ZERO,
             last_vel: Vec3::ZERO,
@@ -245,7 +249,8 @@ impl Car {
             // Brakes slow the wheel toward a stop but never past it: a locked wheel skids.
             let bias = if w.front { 1.0 } else { 0.6 };
             let bias = if slip.0 < -ABS_SLIP { 0.0 } else { bias };
-            let stop = self.brake * BRAKE_TORQUE * bias * h / WHEEL_INERTIA;
+            let pedal = if self.brakes_failed { 0.0 } else { self.brake };
+            let stop = pedal * BRAKE_TORQUE * bias * h / WHEEL_INERTIA;
             w.spin = spin.signum() * (spin.abs() - stop).max(0.0);
             w.roll += w.spin * h;
             w.slip = slip;
@@ -328,6 +333,9 @@ impl Car {
             }
         }
         let forward = b.vel.dot(b.rot * Vec3::X);
+        if self.yielding {
+            wanted = wanted.min(forward); // never speed up toward someone in the way
+        }
         let push = (0.5 * (wanted - forward)).clamp(-1.0, 1.0);
         (self.throttle, self.brake) = (push.max(0.0), (-push).max(0.0));
     }

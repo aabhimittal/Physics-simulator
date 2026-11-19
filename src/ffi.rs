@@ -240,7 +240,7 @@ pub extern "C" fn drive(throttle: f64, steer: f64) {
 
 /// Car scene readout: `[speed km/h, sideways acceleration in g, body roll in degrees,
 /// front tyre slip angle in degrees, 1 if on autopilot, 1 if slowing for a pedestrian,
-/// brake pedal 0..1, gear (-1 reverse), engine rpm]`.
+/// brake pedal 0..1, gear (-1 reverse), engine rpm, 1 if the brakes have failed]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn car(field: u32) -> f64 {
     with(|s| {
@@ -265,7 +265,8 @@ pub extern "C" fn car(field: u32) -> f64 {
             5 => car.yielding as u8 as f64,
             6 => car.brake,
             7 => car.gear as f64,
-            _ => car.rpm,
+            8 => car.rpm,
+            _ => car.brakes_failed as u8 as f64,
         }
     })
 }
@@ -311,4 +312,18 @@ pub extern "C" fn walker_part(link: u32) -> u32 {
     robot::WALKER_PARTS
         .get(link as usize)
         .map_or(0, |&p| p as u32)
+}
+
+/// Crossing scene: start it again with the car's brakes failed (1), timed to reach the
+/// person (`scenes::crossing_brakes_failed`), or as normal (0).
+#[unsafe(no_mangle)]
+pub extern "C" fn fail_brakes(failed: u32) {
+    with(|s| {
+        let (world, walker) = if failed != 0 {
+            scenes::crossing_brakes_failed()
+        } else {
+            scenes::crossing()
+        };
+        (s.world, s.robot) = (world, Some(walker));
+    })
 }
