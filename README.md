@@ -209,9 +209,43 @@ implicitly, since the tyre makes it stiff. Each wheel's ray finds the nearest su
 any body (ground, kerb, ramp, crate, log) and pushes back on it, so the car climbs ramps,
 jumps off them, bumps over the speed hump and shoves loose objects.
 `tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.1 m against the
-ideal v²/2μg = 39.3 m, 0-100 km/h in about 8 s with clean upshifts, sideways acceleration
+ideal v²/2μg = 39.3 m, 0-100 km/h in about 10 s with clean upshifts, sideways acceleration
 v²/r on its circle with under 4° of body roll, a wheel standing on a block, and a ramp jump
 that lands on its wheels.
+
+### Checked against a real car (comma2k19)
+
+[comma2k19](https://github.com/commaai/comma2k19) (comma.ai, MIT licence) records a 2016
+Honda Civic's CAN bus and a phone IMU over 33 hours of highway commuting. The car has the
+Civic's 2.70 m wheelbase, so `tests/vehicle.rs` replays twelve one-minute Civic drives
+(`tests/data/comma2k19.csv`, written by `python/comma2k19.py`, which reads only the few
+arrays it needs out of the 10 GB chunks over HTTP range requests): the recorded
+steering-wheel angle through the Civic's 15.38:1 ratio, and a cruise controller following
+the recorded speed. It compares the simulated yaw rate with the phone gyro's.
+
+The first replay found a real flaw. On the highway the Civic turns only about 0.65 times as
+tightly as its wheels point (understeer), and the car turned 0.9 times. Its tyres' cornering
+stiffness was exactly proportional to load, which makes understeer cancel out whatever the
+weight distribution. Two changes from the textbook fixed it: tyres whose cornering stiffness
+grows as load^0.5 (real tyres measure about 0.5 to 0.8), and the Civic's 61% of weight on
+the front wheels. The exponent was chosen on 30 drives from chunk 3; the test uses drives
+from chunk 5, recorded on other days:
+
+| 30 held-out drives (chunk 5) | Before | After |
+|---|---|---|
+| Yaw gain, simulated minus recorded (mean of the 21 highway drives) | +0.25 | +0.03 |
+| Yaw rate error against the gyro (rms, mean of all 30) | 0.0123 rad/s | 0.0087 rad/s |
+
+Steering geometry alone (no tyre slip) is 0.0142 rad/s off. The committed test replays 12
+of these drives and requires the highway yaw gain within 0.05 on average and 0.1 on each
+drive; with the old tyres it fails, 0.23 off. The autopilot now adds the
+steering an understeering car needs as speed rises (1 + 6·10⁻⁴·v²), as drivers learn to.
+Limits: comma2k19 has no pedal positions, so only the turning is checked, not the engine or
+brakes; slow, sharp turns read about 0.1 off, as the Civic Touring's variable-ratio steering
+is quicker near lock than the fixed 15.38:1 used here; the car is still rear-wheel drive,
+where the Civic is front-wheel drive, which with 39% of its weight on the rear wheels makes
+its launch traction-limited (0-100 km/h in 9.9 s, from 8 s before).
+
 In the browser it drives itself; arrow keys or WASD take over. It is drawn car-shaped
 (an extruded side profile with a glass cabin, rounded edges), with headlights and tail
 lights that light up with the simulated brake pedal, and the readout shows gear and rpm; the road has a
@@ -236,7 +270,7 @@ toward someone in the way; it lifts off and lets the brakes do the rest.
 The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene with the
 brake pedal doing nothing, the car placed 125° back round the road at 50 km/h so it arrives
 just as the person is in its lane. The driver still sees them and lifts off, but coasting
-cannot stop it: it strikes them at about 46 km/h and slows as it passes them momentum. The
+cannot stop it: it strikes them at about 45 km/h and slows as it passes them momentum. The
 timing is staged (starts from 110° to 145° back all lead to an impact); what follows is
 not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
