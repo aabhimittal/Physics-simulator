@@ -350,122 +350,38 @@ fn gait_measures(shove: f64) -> Option<[f64; 7]> {
     ])
 }
 
-/// How far a gait is from typical adult walking (speed 1.3 m/s, 1.85 steps a second, stance
-/// knee 18°, swing knee 60°, push-off to -16°, heel-first landings, upright torso), and
-/// heavily penalised if it falls on its own or after a 250 N shove either way.
-fn gait_cost() -> f64 {
-    let Some(
-        [
-            speed,
-            cadence,
-            stance_knee,
-            swing_knee,
-            push_off,
-            toe_first,
-            tilt,
-        ],
-    ) = gait_measures(0.0)
-    else {
-        return 1e4;
-    };
-    let d = f64::to_radians;
-    let falls = [0.06, -0.06]
-        .iter()
-        .filter(|&&s| gait_measures(s).is_none())
-        .count() as f64;
-    ((speed - 1.3) / 0.1).powi(2)
-        + ((cadence - 1.85) / 0.1).powi(2)
-        + ((stance_knee - d(18.0)) / d(5.0)).powi(2)
-        + ((swing_knee - d(60.0)) / d(10.0)).powi(2)
-        + ((push_off + d(16.0)) / d(4.0)).powi(2)
-        + 10.0 * toe_first
-        + (tilt / d(8.0)).powi(2)
-        + 100.0 * falls
-}
-
-/// Tunes the walking gait by random search: perturb the best parameters, keep a trial if it
-/// scores better, widen the search after a success and narrow it after failures. Prints the
-/// best gait as Rust to paste into `robot::WALK`. Slow, so opt in:
-/// `cargo test --release --test robot tune_walk -- --ignored --nocapture`.
 #[test]
-#[ignore]
-fn tune_walk() {
-    use physics_simulator::env::Rng;
-    use physics_simulator::robot::{Gait, WALK, with_gait};
-    let pack = |g: &Gait| {
-        [
-            g.swing_time,
-            g.swinging.swing_hip,
-            g.swinging.swing_knee,
-            g.swinging.swing_ankle,
-            g.swinging.stance_knee,
-            g.landing.swing_hip,
-            g.landing.swing_knee,
-            g.landing.swing_ankle,
-            g.landing.stance_knee,
-            g.distance_gain,
-            g.speed_gain,
-            g.lean,
-            g.push_off,
-            g.knee_stiffness,
-            g.ankle_stiffness,
-        ]
-    };
-    let unpack = |v: &[f64; 15]| {
-        let mut g = WALK;
-        [
-            g.swing_time,
-            g.swinging.swing_hip,
-            g.swinging.swing_knee,
-            g.swinging.swing_ankle,
-            g.swinging.stance_knee,
-            g.landing.swing_hip,
-            g.landing.swing_knee,
-            g.landing.swing_ankle,
-            g.landing.stance_knee,
-            g.distance_gain,
-            g.speed_gain,
-            g.lean,
-            g.push_off,
-            g.knee_stiffness,
-            g.ankle_stiffness,
-        ] = *v;
-        g
-    };
-    let scale = [
-        0.04, 0.08, 0.1, 0.1, 0.05, 0.08, 0.05, 0.08, 0.05, 0.08, 0.05, 0.02, 0.08, 60.0, 40.0,
-    ];
-    let score = |v: &[f64; 15]| with_gait(unpack(v), gait_cost);
-    let mut best = pack(&WALK);
-    let mut best_cost = score(&best);
-    let mut rng = Rng::new(7);
-    let mut sigma = 1.0;
-    println!("start: cost {best_cost:.1}");
-    for round in 0..120 {
-        let trials: Vec<[f64; 15]> = (0..4)
-            .map(|_| std::array::from_fn(|i| best[i] + sigma * scale[i] * rng.uniform()))
-            .collect();
-        let costs: Vec<f64> = std::thread::scope(|s| {
-            let handles: Vec<_> = trials.iter().map(|t| s.spawn(move || score(t))).collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        let (i, &cost) = costs
-            .iter()
-            .enumerate()
-            .min_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap();
-        if cost < best_cost {
-            (best, best_cost) = (trials[i], cost);
-            sigma = (sigma * 1.3).min(2.0);
-            println!(
-                "round {round}: cost {best_cost:.2} {:?}",
-                with_gait(unpack(&best), || gait_measures(0.0))
-            );
-        } else {
-            sigma = (sigma * 0.85).max(0.1);
+fn walker_moves_like_the_motion_capture() {
+    // Joint angles close to the recorded person's through the whole step (the hand-tuned
+    // SIMBICON walk it replaced was 14.6° off), knees swinging as far as people's, heel first.
+    let mut r = robot::walker();
+    let (mut err, mut n) = (0.0, 0.0);
+    for frame in 0..(15.0 / DT) as usize {
+        r.step(DT, 16);
+        if frame >= 300 {
+            err += robot::imitation_error(&r);
+            n += 1.0;
         }
     }
-    println!("best cost {best_cost:.2}\n{:#?}", unpack(&best));
+    let rms = (err / n).sqrt().to_degrees();
+    let [_, _, _, swing_knee, _, toe_first, tilt] = gait_measures(0.0).expect("fell");
+    println!(
+        "pose {rms:.1}° rms from the capture; swing knee {:.0}°, toe-first {toe_first:.2}, tilt {:.1}°",
+        swing_knee.to_degrees(),
+        tilt.to_degrees()
+    );
+    assert!(rms < 8.0, "{rms:.1}° from the capture");
+    assert!(
+        (50f64.to_radians()..80f64.to_radians()).contains(&swing_knee),
+        "swing knee {:.0}°",
+        swing_knee.to_degrees()
+    );
+    assert!(toe_first < 0.2, "{toe_first:.2} of landings toe first");
+    assert!(
+        tilt < 10f64.to_radians(),
+        "torso tilts {:.1}°",
+        tilt.to_degrees()
+    );
 }
 
 #[test]

@@ -83,7 +83,7 @@ sideways), sensors, and loading models from a file.
 `src/env.rs` wraps the robots in the usual contract:
 
 ```rust
-let mut env = Env::new(Task::Balance);       // or Task::Hop, Task::Reach
+let mut env = Env::new(Task::Balance);       // or Task::Hop, Task::Reach, Task::Imitate
 let mut obs = env.reset(seed);               // same seed, same start
 loop {
     let step = env.step(&action);            // one number in [-1, 1] per motor
@@ -154,30 +154,45 @@ smoother, more repeatable hops.
 ## Walking person
 
 `robot::walker` is a 70 kg planar body: torso, thigh, shin and foot per leg, and an upper
-arm and forearm per side, with motors about as strong as human muscle. It is driven by
-SIMBICON (Yin, Loken and van de Panne, 2007): a phase cycle of spring-damper targets, the
-stance hip holding the torso upright, and foot placement that steps further ahead the
-faster and further the body is ahead of the stance foot. On top of that, to look less
-like a robot:
+arm and forearm per side, with motors about as strong as human muscle. It walks by
+**imitating motion capture**, the DeepMimic approach (Peng et al., 2018) in miniature:
 
-- **Push-off**: while the trailing foot is still down the calf points the toe and drives
-  the body on; it eases off when walking faster than the 1.6 m/s it aims for.
-- **Stiff stance knee and ankle**, so the body walks tall instead of crouching (the
-  original crouched to 48° of knee bend; now about 10°).
-- **Reaching for the ground when the body says so**: the swing leg extends for landing
-  after its swing time *or* once the stance leg is 0.25 rad behind the body. With time
-  alone, a slightly fast body fell past its stance foot and stumbled every few steps.
-- **Smooth targets** (blended over 0.1 s, as muscles ramp) and **swinging arms**, which
-  are real links whose mass the balance has to carry.
+1. **A recorded walk.** `python/mocap.py` reads subject 35, trial 2 of the [CMU Graphics
+   Lab Motion Capture Database](http://mocap.cs.cmu.edu/) (which may be copied and
+   redistributed without permission). Forward kinematics gives every joint's 3D position;
+   each limb is projected onto the side-on plane the walker moves in; one gait cycle is cut
+   out at the heel strikes and its left and right halves averaged into one step. The result
+   is `src/mocap_walk.rs`: torso, hip, knee, ankle, shoulder and elbow angles for the
+   stance and swing sides through a 0.57 s step, at 1.25 m/s.
+2. **A tracking controller** (`robot::imitate`) aims every joint at the recorded angle,
+   with SIMBICON's balance rules on top (Yin, Loken and van de Panne, 2007): the stance
+   hip holds the torso upright, and the swing foot lands further ahead the further and
+   faster the body is ahead of the stance foot. Alone it cannot walk: joint springs pull
+   only once a joint is already off target, so they trail the recording, and the best
+   settings a random search found keep it upright only by shuffling on the spot.
+3. **A learned correction** (`robot::mimic_walk`): a network of two 64-unit layers adds up
+   to ±0.3 rad to six of those targets (torso, swing hip, knee and ankle, stance knee and
+   ankle). PPO trained it on `env::Task::Imitate` for 1.8M steps (about 15 minutes on 4
+   cores), rewarded for matching the recorded pose and speed, starting each episode at a
+   random point in the stride and shoving the chest with up to 300 N about every two
+   seconds. It sees and acts in stance/swing terms, so one network drives both legs.
 
-It walks at 1.14 m/s, 1.9 steps a second, 0.6 m steps varying by under 10%, heel
-first, within the range of adult walking, and survives shoves up to 250 N either way at
-any point of the stride (36 of 36 in a sweep). (It walked a brisker 1.6 m/s until ground
-contact became implicit; friction now wastes less of the push-off as foot slip.) It is
-not fully human: it walks in a plane (no hip sway or pelvis twist), pushes off to about
--5° where people reach -16°, and keeps its stance knee straighter (10° against 15-20°). `tests/robot.rs` has an opt-in random-search tuner
-(`cargo test --release --test robot tune_walk -- --ignored --nocapture`); it scores only
-two shoves, so check what it finds against more before adopting it.
+Measured over seconds 5 to 15:
+
+| | Hand-tuned SIMBICON (before) | Motion-capture imitation |
+|---|---|---|
+| Joint angles off the recording (rms) | 14.6° | 6.8° |
+| Speed, cadence, step | 1.14 m/s, 1.9/s, 0.6 m | 1.18 m/s, 1.9/s, 0.61 m |
+| Swing knee at its most bent | | 73° (the recording: 72°) |
+| 250 N shoves survived, both ways through a stride | 36 of 36 | 36 of 36 |
+
+It lands heel first, steps evenly, and once knocked down stops trying to walk (the muscles
+let go). To retrain: `python3 python/train_hopper.py imitate 1800000 0`, then copy
+`ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; PPO results
+vary by seed and checkpoint, so trust the tests, not the training log. Limits: it walks
+in a plane (no hip sway or pelvis twist), knows one walk at one speed (no turning, starting
+or stopping), and the recording's upper arms, held about 30° forward throughout, are
+centred to hang so they don't look like reaching.
 
 In the browser the links are drawn as a person (tapered limbs, head, hands, shoes,
 clothes); the physics underneath is the same set of boxes.
@@ -219,10 +234,10 @@ of it: several stops, never closer than 5.9 m centre to person. The driver never
 toward someone in the way; it lifts off and lets the brakes do the rest.
 
 The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene with the
-brake pedal doing nothing, the car placed 155° back round the road at 50 km/h so it arrives
+brake pedal doing nothing, the car placed 125° back round the road at 50 km/h so it arrives
 just as the person is in its lane. The driver still sees them and lifts off, but coasting
-cannot stop it: it strikes them at about 47 km/h and slows as it passes them momentum. The
-timing is staged (starts from 140° to 170° back all lead to an impact); what follows is
+cannot stop it: it strikes them at about 46 km/h and slows as it passes them momentum. The
+timing is staged (starts from 110° to 145° back all lead to an impact); what follows is
 not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
 Limits: a wheel is a single ray, so it meets a kerb's edge by snapping up onto it rather
