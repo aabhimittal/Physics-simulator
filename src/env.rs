@@ -18,7 +18,17 @@ pub enum Task {
     /// Arm: bring the tip to a random target.
     /// Observation `[four joint angles, four rates, target - tip]`; reward = -distance.
     Reach,
+    /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
+    /// controller's joint targets. Observation and action are in stance/swing order (see
+    /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
+    /// its speed.
+    Imitate,
 }
+
+/// Corrections the imitation policy makes: torso lean, swing hip, knee and ankle, stance
+/// knee and ankle; each up to `IMITATE_REACH` radians either way.
+pub const IMITATE_ACTIONS: usize = 6;
+pub const IMITATE_REACH: f64 = 0.3;
 
 /// Result of one `Env::step`.
 pub struct Step {
@@ -76,7 +86,10 @@ impl Env {
     }
 
     pub fn action_size(&self) -> usize {
-        self.motors().count()
+        match self.task {
+            Task::Imitate => IMITATE_ACTIONS,
+            _ => self.motors().count(),
+        }
     }
 
     /// Starts a new episode from a slightly random state fixed by `seed`. Returns the first observation.
@@ -86,11 +99,20 @@ impl Env {
             Task::Balance => robot::cart_pole(),
             Task::Hop => robot::hopper(),
             Task::Reach => robot::arm(),
+            Task::Imitate => robot::walker(),
         };
-        r.controller = None; // the agent drives the motors, not the built-in controller
+        // The agent drives the motors, not the built-in controller; except when imitating,
+        // where it corrects the controller.
+        r.controller = None;
         match self.task {
             Task::Balance => r.q[1] = 0.0, // upright
             Task::Hop => r.q[1] = 1.0,     // standing on the ground
+            Task::Imitate => {
+                // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
+                r.controller = Some(robot::imitate);
+                r.adjust = vec![0.0; IMITATE_ACTIONS];
+                robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
+            }
             Task::Reach => {
                 let target = Vec3::new(
                     0.7 + 0.2 * rng.uniform(),
@@ -119,6 +141,7 @@ impl Env {
             }
             // The hopper's x position is left out, so a policy cannot depend on where it is.
             Task::Hop => r.q[1..].iter().chain(&r.qd).copied().collect(),
+            Task::Imitate => robot::imitation_obs(r),
             Task::Reach => {
                 let offset = r.target.unwrap() - self.tip();
                 r.q.iter()
@@ -142,10 +165,15 @@ impl Env {
             self.action_size(),
             "action needs one entry per motor"
         );
-        let motors: Vec<usize> = self.motors().collect();
-        for (&joint, &a) in motors.iter().zip(action) {
-            // NaN would poison the whole state; treat it as no command.
-            self.robot.ctrl[joint] = if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
+        // NaN would poison the whole state; treat it as no command.
+        let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
+        if self.task == Task::Imitate {
+            self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
+        } else {
+            let motors: Vec<usize> = self.motors().collect();
+            for (&joint, &a) in motors.iter().zip(action) {
+                self.robot.ctrl[joint] = clean(a);
+            }
         }
         self.robot
             .step(Self::DT, if self.robot.ground { 16 } else { 8 });
@@ -162,6 +190,15 @@ impl Env {
                 )
             }
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
+            Task::Imitate => {
+                // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
+                let pose = (-10.0 * robot::imitation_error(r)).exp();
+                let speed = (-4.0 * (r.qd[0] - crate::mocap_walk::SPEED).powi(2)).exp();
+                (
+                    0.7 * pose + 0.3 * speed,
+                    r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
+                )
+            }
         };
         Step {
             obs,
@@ -244,15 +281,25 @@ impl Learner {
 /// The hopper policy trained by `python/train_hopper.py`: a neural network with two
 /// hidden layers of 64 tanh units, from observation to motor commands.
 pub fn hop_policy(obs: &[f64]) -> Vec<f64> {
-    // Raw little-endian f32: for each layer its weights (one row per output), then its biases.
-    static WEIGHTS: &[u8] = include_bytes!("hop_policy.bin");
-    let mut weights = WEIGHTS
+    network(include_bytes!("hop_policy.bin"), obs, 2)
+}
+
+/// The walking policy trained by `python/train_hopper.py imitate`: corrections to the
+/// imitation controller's targets (`Task::Imitate`), same network shape as the hopper's.
+pub fn walk_policy(obs: &[f64]) -> Vec<f64> {
+    network(include_bytes!("walk_policy.bin"), obs, IMITATE_ACTIONS)
+}
+
+/// Runs a network stored as raw little-endian f32: for each layer its weights (one row per
+/// output), then its biases. Two hidden layers of 64 tanh units, then `outputs` linear ones.
+fn network(stored: &[u8], obs: &[f64], outputs: usize) -> Vec<f64> {
+    let mut weights = stored
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64);
     let mut x = obs.to_vec();
-    for (outputs, squash) in [(64, true), (64, true), (2, false)] {
-        let rows: Vec<f64> = weights.by_ref().take(outputs * x.len()).collect();
-        assert_eq!(rows.len(), outputs * x.len(), "hop_policy.bin is too short");
+    for (size, squash) in [(64, true), (64, true), (outputs, false)] {
+        let rows: Vec<f64> = weights.by_ref().take(size * x.len()).collect();
+        assert_eq!(rows.len(), size * x.len(), "policy file is too short");
         x = rows
             .chunks(x.len())
             .zip(weights.by_ref())
@@ -260,7 +307,7 @@ pub fn hop_policy(obs: &[f64]) -> Vec<f64> {
             .map(|sum| if squash { sum.tanh() } else { sum })
             .collect();
     }
-    assert!(weights.next().is_none(), "hop_policy.bin is too long");
+    assert!(weights.next().is_none(), "policy file is too long");
     x
 }
 

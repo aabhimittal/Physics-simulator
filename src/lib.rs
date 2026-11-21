@@ -13,6 +13,7 @@ mod collide;
 pub mod env;
 #[cfg(target_arch = "wasm32")]
 mod ffi;
+pub mod mocap_walk;
 pub mod robot;
 pub mod scenes;
 pub mod vehicle;
