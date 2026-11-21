@@ -62,6 +62,9 @@ pub struct Env {
     pub robot: Robot,
     pub task: Task,
     steps: u32,
+    /// Random shoves while imitating: the generator, and the shove's steps left.
+    rng: Rng,
+    shove_left: u32,
 }
 
 impl Env {
@@ -75,6 +78,8 @@ impl Env {
             robot: Robot::new(Vec::new()),
             task,
             steps: 0,
+            rng: Rng::new(0),
+            shove_left: 0,
         };
         env.reset(0);
         env
@@ -128,6 +133,7 @@ impl Env {
         }
         self.robot = r;
         self.steps = 0;
+        (self.rng, self.shove_left) = (rng, 0);
         self.observe()
     }
 
@@ -169,6 +175,24 @@ impl Env {
         let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
         if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
+            // About every two seconds, a shove of up to 300 N either way on the chest for a
+            // fifth of a second, so the policy learns to recover as well as to walk.
+            if self.shove_left == 0 && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
+                let torso = self.robot.frames(&self.robot.q)[robot::WALKER_TORSO];
+                let force = Vec3::X * 300.0 * self.rng.uniform();
+                self.robot.external = vec![robot::Push {
+                    link: robot::WALKER_TORSO,
+                    at: torso.0 + torso.1 * Vec3::Y * 0.3,
+                    force,
+                }];
+                self.shove_left = 12;
+            }
+            if self.shove_left > 0 {
+                self.shove_left -= 1;
+                if self.shove_left == 0 {
+                    self.robot.external.clear();
+                }
+            }
         } else {
             let motors: Vec<usize> = self.motors().collect();
             for (&joint, &a) in motors.iter().zip(action) {
