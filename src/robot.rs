@@ -123,6 +123,9 @@ pub struct Robot {
     /// Forces on the links from outside (contact with world bodies, see `touch`), held for
     /// the next step.
     pub external: Vec<Push>,
+    /// Corrections a learned policy adds to the controller's joint targets (rad), in the
+    /// controller's own order. Empty when no policy is attached.
+    pub adjust: Vec<f64>,
 }
 
 impl Robot {
@@ -141,6 +144,7 @@ impl Robot {
             pull: None,
             ground: false,
             external: Vec::new(),
+            adjust: Vec::new(),
         }
     }
 
@@ -1135,3 +1139,293 @@ const TOUCH_STIFFNESS: f64 = 3.0e4;
 const TOUCH_DAMPING: f64 = 300.0;
 const TOUCH_GRIP: f64 = 2000.0;
 const TOUCH_FRICTION: f64 = 0.5;
+
+/// Motion-capture reference at phase `phase` (0 at the stance heel strike, 1 at the swing
+/// foot's), interpolated between samples.
+fn reference(phase: f64) -> [f64; 11] {
+    use crate::mocap_walk::STEP;
+    let x = phase.clamp(0.0, 1.0) * (STEP.len() - 1) as f64;
+    let (i, t) = (x as usize, x.fract());
+    let j = (i + 1).min(STEP.len() - 1);
+    std::array::from_fn(|k| STEP[i][k] + (STEP[j][k] - STEP[i][k]) * t)
+}
+
+/// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk.
+pub fn imitate(r: &mut Robot) {
+    if r.time == 0.0 && r.memory[2] == 0.0 && r.memory[1] == 0.0 {
+        start_in_stride(r, 0.0);
+    }
+    use crate::mocap_walk::{SPEED, STEP_SECONDS};
+    let m = MIMIC.with(Cell::get);
+    let [stance_side, step_start, steps, mut landing_start] = r.memory;
+    let side = stance_side as usize;
+    let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
+    let frames = r.frames(&r.q);
+    let sole = |foot: usize| {
+        let (o, rot) = frames[foot];
+        let l = &r.links[foot];
+        (0..4)
+            .map(|k| {
+                o + rot
+                    * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1]))
+            })
+            .fold(f64::INFINITY, |low, p| low.min(p.y))
+    };
+    let phase = (r.time - step_start) / (STEP_SECONDS * m.tempo);
+    // The trailing foot is still down early in a step (double support): only once it has
+    // lifted, late in the step, can its landing end the step.
+    if landing_start.is_infinite()
+        && sole(swing + 2) > 0.01
+        && (phase > m.reach || r.q[WALKER_TORSO] + r.q[stance] < -STANCE_BEHIND)
+    {
+        landing_start = r.time;
+        r.memory[3] = r.time;
+    }
+    if r.time > landing_start && sole(swing + 2) < 0.005 {
+        r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY];
+        return imitate(r);
+    }
+    let mut refs = reference(phase + m.lead);
+    // The policy's corrections, if any: torso, swing hip, knee, ankle, stance knee, ankle.
+    for (k, a) in [0, 4, 5, 6, 2, 3].into_iter().zip(&r.adjust) {
+        refs[k] += a;
+    }
+    let [
+        lean,
+        _,
+        stance_knee,
+        stance_ankle,
+        swing_hip,
+        swing_knee,
+        swing_ankle,
+        s0,
+        e0,
+        s1,
+        e1,
+    ] = refs;
+    let total: f64 = r.links.iter().map(|l| l.mass).sum();
+    let (com, com_vel) = {
+        let vel = r.velocities(&frames, &r.qd);
+        r.links.iter().zip(&frames).zip(&vel).fold(
+            (Vec3::ZERO, Vec3::ZERO),
+            |(p, v), ((l, (o, rot)), (w, vo))| {
+                let rc = *rot * l.com;
+                (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
+            },
+        )
+    };
+    let (com, com_vel) = (com / total, com_vel / total);
+    let ankle = frames[stance + 2].0;
+    let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
+    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
+    let aim = swing_hip
+        + m.distance_gain * (com.x - ankle.x)
+        + m.speed_gain * (com_vel.x - SPEED * m.speed);
+    let swing_torque = pd(
+        pitch + r.q[swing],
+        pitch_rate + r.qd[swing],
+        aim,
+        m.swing_gain,
+    );
+    let torso = pd(pitch, pitch_rate, m.lean + lean, 600.0);
+    let mut torque = vec![0.0; r.q.len()];
+    torque[swing] = swing_torque;
+    torque[stance] = -torso - swing_torque;
+    torque[swing + 1] = pd(r.q[swing + 1], r.qd[swing + 1], swing_knee, m.swing_gain);
+    let swing_ankle_gain = if sole(swing + 2) < 0.005 {
+        m.ankle_stiffness
+    } else {
+        30.0
+    };
+    torque[swing + 2] = pd(
+        r.q[swing + 2],
+        r.qd[swing + 2],
+        swing_ankle,
+        swing_ankle_gain,
+    );
+    torque[stance + 1] = pd(
+        r.q[stance + 1],
+        r.qd[stance + 1],
+        stance_knee,
+        m.knee_stiffness,
+    );
+    torque[stance + 2] = pd(
+        r.q[stance + 2],
+        r.qd[stance + 2],
+        stance_ankle,
+        m.ankle_stiffness,
+    );
+    for (k, (shoulder, elbow)) in [(s0, e0), (s1, e1)].into_iter().enumerate() {
+        let joint = SHOULDERS[if k == 0 { side } else { 1 - side }];
+        torque[joint] = pd(r.q[joint], r.qd[joint], shoulder, 60.0);
+        torque[joint + 1] = pd(r.q[joint + 1], r.qd[joint + 1], elbow, 30.0);
+    }
+    for i in WALKER_TORSO + 1..r.q.len() {
+        r.ctrl[i] = torque[i] / r.links[i].gear;
+    }
+    r.target = Some(Vec3::new(com.x, 0.02, com.z));
+}
+
+/// The imitation controller's own settings (the joint targets come from the capture).
+#[derive(Clone, Copy, Debug)]
+pub struct Mimic {
+    pub distance_gain: f64,
+    pub speed_gain: f64,
+    pub lean: f64,
+    /// Step duration and walking speed relative to the capture's.
+    pub tempo: f64,
+    pub speed: f64,
+    /// Phase after which a landing ends the step.
+    pub reach: f64,
+    pub knee_stiffness: f64,
+    pub ankle_stiffness: f64,
+    /// How far ahead in the capture the joints aim (fraction of a step), and the swing
+    /// hip and knee stiffness (N·m/rad).
+    pub lead: f64,
+    pub swing_gain: f64,
+}
+
+pub const MIMIC_WALK: Mimic = Mimic {
+    distance_gain: 1.02,
+    speed_gain: 0.51,
+    lean: 0.046,
+    tempo: 1.08,
+    speed: 1.08,
+    reach: 0.51,
+    knee_stiffness: 918.0,
+    ankle_stiffness: 851.0,
+    lead: 0.355,
+    swing_gain: 489.0,
+};
+
+thread_local! {
+    static MIMIC: Cell<Mimic> = const { Cell::new(MIMIC_WALK) };
+}
+
+pub fn with_mimic<T>(m: Mimic, f: impl FnOnce() -> T) -> T {
+    let old = MIMIC.with(|g| g.replace(m));
+    let out = f();
+    MIMIC.with(|g| g.set(old));
+    out
+}
+
+/// Puts the walker in the capture's pose `phase` of the way through a step, moving at its
+/// speed, the lower foot on the floor.
+pub fn start_in_stride(r: &mut Robot, phase: f64) {
+    use crate::mocap_walk::STEP_SECONDS;
+    let m = MIMIC.with(Cell::get);
+    let at = |phase| {
+        let [
+            lean,
+            stance_hip,
+            stance_knee,
+            stance_ankle,
+            swing_hip,
+            swing_knee,
+            swing_ankle,
+            ..,
+        ] = reference(phase);
+        [
+            lean,
+            stance_hip - lean,
+            stance_knee,
+            stance_ankle,
+            swing_hip - lean,
+            swing_knee,
+            swing_ankle,
+        ]
+    };
+    // Joint rates from the capture too, so the joints are already moving as they should.
+    let (now, soon) = (at(phase), at(phase + 0.02));
+    let rate = |k: usize| (soon[k] - now[k]) / (0.02 * STEP_SECONDS * m.tempo);
+    let (stance, swing) = (WALKER_HIPS[0], WALKER_HIPS[1]);
+    for (k, joint) in [
+        WALKER_TORSO,
+        stance,
+        stance + 1,
+        stance + 2,
+        swing,
+        swing + 1,
+        swing + 2,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        (r.q[joint], r.qd[joint]) = (now[k], rate(k));
+    }
+    r.memory = [
+        0.0,
+        r.time - phase * STEP_SECONDS * m.tempo,
+        0.0,
+        f64::INFINITY,
+    ];
+    r.q[1] = 0.0;
+    let frames = r.frames(&r.q);
+    let low = [stance + 2, swing + 2]
+        .into_iter()
+        .flat_map(|foot| {
+            let (o, rot) = frames[foot];
+            let l = &r.links[foot];
+            (0..4).map(move |k| {
+                (o + rot
+                    * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1])))
+                .y
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    r.q[1] = -low + 0.002;
+    r.qd[0] = crate::mocap_walk::SPEED;
+}
+
+/// Squared difference (rad²) between the walker's pose and the capture's at the current
+/// phase of its step, averaged over the leg joints and the torso.
+pub fn imitation_error(r: &Robot) -> f64 {
+    use crate::mocap_walk::STEP_SECONDS;
+    let m = MIMIC.with(Cell::get);
+    let side = r.memory[0] as usize;
+    let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
+    let refs = reference((r.time - r.memory[1]) / (STEP_SECONDS * m.tempo));
+    let pitch = r.q[WALKER_TORSO];
+    let have = [
+        pitch - m.lean,
+        pitch + r.q[stance],
+        r.q[stance + 1],
+        r.q[stance + 2],
+        pitch + r.q[swing],
+        r.q[swing + 1],
+        r.q[swing + 2],
+    ];
+    have.iter()
+        .zip(&refs)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        / have.len() as f64
+}
+
+/// What the imitation policy sees, the same whichever leg is on the ground: phase of the
+/// step (as sine and cosine, and its raw value), height, vertical and forward speed, torso
+/// pitch and rate, then the stance leg's hip, knee and ankle and the swing leg's, angles and
+/// then rates. Rates scaled by 0.1 to keep every input near ±1.
+pub fn imitation_obs(r: &Robot) -> Vec<f64> {
+    use crate::mocap_walk::STEP_SECONDS;
+    let m = MIMIC.with(Cell::get);
+    let side = r.memory[0] as usize;
+    let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
+    let phase = ((r.time - r.memory[1]) / (STEP_SECONDS * m.tempo)).min(1.5);
+    let joints = [stance, stance + 1, stance + 2, swing, swing + 1, swing + 2];
+    let tau = std::f64::consts::TAU;
+    [
+        (tau * phase).sin(),
+        (tau * phase).cos(),
+        phase,
+        r.q[1],
+        r.qd[1],
+        r.qd[0],
+        r.q[WALKER_TORSO],
+        0.1 * r.qd[WALKER_TORSO],
+    ]
+    .into_iter()
+    .chain(joints.iter().map(|&j| r.q[j]))
+    .chain(joints.iter().map(|&j| 0.1 * r.qd[j]))
+    .collect()
+}

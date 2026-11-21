@@ -6,7 +6,7 @@
 
 Prints the average result of 10 evaluation episodes before training and after
 every tenth of the run: return, episode length in seconds, and for the hopper
-the distance travelled.
+the distance travelled (hop and imitate).
 
 The best checkpoint is saved as ppo_<task>.zip, and its network as ppo_<task>.bin.
 To watch a new hopper policy in the browser, copy ppo_hop.bin over
@@ -23,6 +23,7 @@ from physics_simulator import GymEnv
 
 DT = 1 / 60  # control period, Env::DT in src/env.rs
 EPISODES = 10
+SPEED_OBS = {"hop": 4, "imitate": 5}  # which observation is the forward speed
 
 
 def evaluate(model, task):
@@ -38,8 +39,8 @@ def evaluate(model, task):
             done = terminated or truncated
             totals[0] += reward
             totals[1] += DT
-            if task == "hop":
-                totals[2] += obs[4] * DT  # observation 4 is the forward speed
+            if task in SPEED_OBS:
+                totals[2] += obs[SPEED_OBS[task]] * DT
     return [t / EPISODES for t in totals]
 
 
