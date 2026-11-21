@@ -2,7 +2,7 @@
 
 use glam::DVec3 as Vec3;
 use physics_simulator::scenes::{self, CAR_SCENE};
-use physics_simulator::vehicle::Car;
+use physics_simulator::vehicle::{Car, WHEELBASE};
 use physics_simulator::{Body, Shape, World};
 
 const DT: f64 = 1.0 / 60.0;
@@ -343,4 +343,87 @@ fn the_driver_never_speeds_up_toward_someone_in_the_way() {
         fastest_after < seen_at + 0.05,
         "sped up from {seen_at:.2} to {fastest_after:.2} m/s toward someone in its way"
     );
+}
+
+/// Slope of `y` against `x` (least squares, with an offset).
+fn slope(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let (mx, my) = (x.iter().sum::<f64>() / n, y.iter().sum::<f64>() / n);
+    let sxy: f64 = x.iter().zip(y).map(|(a, b)| (a - mx) * (b - my)).sum();
+    let sxx: f64 = x.iter().map(|a| (a - mx).powi(2)).sum();
+    sxy / sxx
+}
+
+#[test]
+fn turns_like_a_real_civic_on_recorded_drives() {
+    // Twelve one-minute drives of a 2016 Honda Civic from comma2k19 (python/comma2k19.py),
+    // none of them used to choose the car's settings. Each is replayed: the recorded steering
+    // through the Civic's 15.38:1 steering ratio, and throttle and brake following the
+    // recorded speed. The yaw rate that results is compared with the phone gyro's.
+    const RATIO: f64 = 15.38;
+    let rows: Vec<[f64; 5]> = include_str!("data/comma2k19.csv")
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            let v: Vec<f64> = l.split(',').map(|s| s.parse().unwrap()).collect();
+            [v[0], v[1], v[2], v[3], v[4]]
+        })
+        .collect();
+    let (mut gain_errors, mut tyres, mut geometry) = (vec![], 0.0, 0.0);
+    for drive in rows.chunk_by(|a, b| a[0] == b[0]) {
+        let mut w = car_at(drive[0][2]);
+        let mut integral = 0.0;
+        let (mut kinematic, mut real, mut sim, mut speed) = (vec![], vec![], vec![], 0.0);
+        for (now, next) in drive.iter().zip(&drive[1..]) {
+            for _ in 0..6 {
+                // A cruise controller holding the recorded speed.
+                let b = &w.bodies[1];
+                let error = now[2] - b.vel.dot(b.rot * Vec3::X);
+                integral = (integral + error * DT).clamp(-5.0, 5.0);
+                let push = 0.5 * error + 0.2 * integral;
+                let car = &mut w.cars[0];
+                (car.throttle, car.brake) = (push.clamp(0.0, 1.0), (-push).clamp(0.0, 1.0));
+                car.steer = now[3].to_radians() / RATIO;
+                w.step(DT);
+            }
+            if next[2] > 3.0 {
+                let wheels = now[3].to_radians() / RATIO;
+                kinematic.push(now[2] * wheels.tan() / WHEELBASE);
+                real.push(next[4]);
+                sim.push(w.bodies[1].omega.y);
+                speed += now[2];
+            }
+        }
+        let n = real.len() as f64;
+        let rms = |a: &[f64]| {
+            (a.iter()
+                .zip(&real)
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                / n)
+                .sqrt()
+        };
+        let (real_gain, sim_gain) = (slope(&kinematic, &real), slope(&kinematic, &sim));
+        println!(
+            "drive {}: {:.1} m/s, yaw gain {real_gain:.2} recorded, {sim_gain:.2} simulated; yaw error {:.4} rad/s (no-slip geometry: {:.4})",
+            drive[0][0],
+            speed / n,
+            rms(&sim),
+            rms(&kinematic)
+        );
+        if speed / n > 20.0 {
+            gain_errors.push(sim_gain - real_gain);
+            (tyres, geometry) = (tyres + rms(&sim), geometry + rms(&kinematic));
+        }
+    }
+    // On the highway the Civic turns only about 0.65 times as tightly as its wheels point
+    // (understeer); the car must match that, drive by drive.
+    let mean = gain_errors.iter().sum::<f64>() / gain_errors.len() as f64;
+    assert!(mean.abs() < 0.05, "yaw gain off by {mean:.3} on average");
+    assert!(
+        gain_errors.iter().all(|e| e.abs() < 0.1),
+        "{gain_errors:.2?}"
+    );
+    // And the tyre model must predict the yaw rate better than steering geometry alone.
+    assert!(tyres < 0.8 * geometry, "{tyres:.3} against {geometry:.3}");
 }

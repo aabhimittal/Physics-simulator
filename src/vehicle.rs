@@ -58,6 +58,16 @@ const ABS_SLIP: f64 = 0.15;
 /// sliding tyre keeps sin(1.4·π/2) = 81% of its peak grip.
 const LONG: (f64, f64) = (16.0, 1.4);
 const LAT: (f64, f64) = (14.0, 1.4);
+/// Tyre load sensitivity: cornering stiffness grows as load^LOAD_SENSITIVITY about the
+/// average load per wheel. Real tyres measure about 0.5 to 0.8; 0.5 matches the Civic's
+/// understeer in comma2k19 (it also stands in for steering compliance, not modelled).
+const NOMINAL_LOAD: f64 = 1200.0 * 9.81 / 4.0;
+const LOAD_SENSITIVITY: f64 = 0.5;
+/// Share of the weight on the front wheels (a 2016 Honda Civic's).
+const FRONT_WEIGHT: f64 = 0.61;
+/// How much the car understeers (s²/m²): it turns 1 / (1 + UNDERSTEER·v²) as tightly as its
+/// wheels point. Measured on this model and on the Civic in comma2k19 (tests/vehicle.rs).
+const UNDERSTEER: f64 = 6.0e-4;
 const ROLLING_RESISTANCE: f64 = 0.015;
 /// Air drag: ½·ρ·Cd·A for a small car.
 const DRAG: f64 = 0.5 * 1.2 * 0.65;
@@ -119,7 +129,8 @@ pub struct Car {
 }
 
 impl Car {
-    /// A 1200 kg, rear-wheel-drive car on `body`, whose box should be about 4.2 x 0.7 x 1.4 m.
+    /// A 1200 kg, rear-wheel-drive car on `body`, whose box should be about 4.2 x 0.7 x 1.4 m,
+    /// with 61% of its weight on the front wheels.
     pub fn new(body: usize) -> Car {
         let wheel = |x: f64, z: f64| Wheel {
             mount: Vec3::new(x, -0.1, z),
@@ -132,14 +143,15 @@ impl Car {
             ground: None,
             slip: (0.0, 0.0),
         };
-        let x = WHEELBASE / 2.0;
+        // The centre of mass sits FRONT_WEIGHT of the way toward the front axle's load.
+        let (front, rear) = (WHEELBASE * (1.0 - FRONT_WEIGHT), -WHEELBASE * FRONT_WEIGHT);
         Car {
             body,
             wheels: vec![
-                wheel(x, 0.8),
-                wheel(x, -0.8),
-                wheel(-x, 0.8),
-                wheel(-x, -0.8),
+                wheel(front, 0.8),
+                wheel(front, -0.8),
+                wheel(rear, 0.8),
+                wheel(rear, -0.8),
             ],
             throttle: 0.0,
             brake: 0.0,
@@ -207,7 +219,14 @@ impl Car {
                 Some(_) if compression > 0.0 => {
                     let stop = (compression - TRAVEL).max(0.0) * BUMP_STOP;
                     let bar = ANTI_ROLL[k / 2] * (compression - partner);
-                    (SPRING * compression + DAMPER * rate + stop + bar).max(0.0)
+                    // Springs and dampers sized to each axle's share, so the car sits level.
+                    let share = 2.0
+                        * if w.front {
+                            FRONT_WEIGHT
+                        } else {
+                            1.0 - FRONT_WEIGHT
+                        };
+                    (share * (SPRING * compression + DAMPER * rate) + stop + bar).max(0.0)
                 }
                 _ => 0.0,
             };
@@ -235,7 +254,10 @@ impl Car {
                     h * (drive - resist - RADIUS * pull) / (WHEEL_INERTIA + h * RADIUS * stiffness);
                 slip = ((spin * RADIUS - along) / scale, across.atan2(scale));
                 let long = magic(slip.0, LONG.0, LONG.1, peak);
-                let lat = -magic(slip.1, LAT.0, LAT.1, peak);
+                // Cornering stiffness grows more slowly than load, so the heavier front axle
+                // grips relatively less: the main source of a front-heavy car's understeer.
+                let soften = (NOMINAL_LOAD / w.load).powf(1.0 - LOAD_SENSITIVITY);
+                let lat = -magic(slip.1, LAT.0 * soften, LAT.1, peak);
                 // Friction circle: both directions share the same grip.
                 let tyre = (heading * long + side * lat).clamp_length_max(peak);
                 // Applied at the contact patch, not the hub: the difference is the drive and
@@ -311,7 +333,10 @@ impl Car {
         let target = Vec3::new(radius * angle.cos(), 0.0, radius * angle.sin());
         let local = b.rot.inverse() * (target - b.pos);
         let curvature = -2.0 * local.z / local.length_squared();
-        self.steer = (WHEELBASE * curvature).atan().clamp(-MAX_STEER, MAX_STEER);
+        // Steering for the curve, plus the extra an understeering car needs as speed rises.
+        let speed2 = b.vel.length_squared();
+        self.steer = ((WHEELBASE * curvature).atan() * (1.0 + UNDERSTEER * speed2))
+            .clamp(-MAX_STEER, MAX_STEER);
         let mut wanted: f64 = if (self.time / 8.0) as u64 % 2 == 0 {
             15.0
         } else {
