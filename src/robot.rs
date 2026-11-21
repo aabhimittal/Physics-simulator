@@ -1210,6 +1210,12 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
 /// `env::walk_policy`.
 pub fn mimic_walk(r: &mut Robot) {
     use crate::env::{IMITATE_REACH, walk_policy};
+    // Once down, a person stops trying to walk: the muscles let go (joint friction remains),
+    // rather than the policy flailing a body it was never trained to move.
+    if r.q[1] < 0.6 || r.q[WALKER_TORSO].abs() > 1.0 {
+        r.ctrl.iter_mut().for_each(|c| *c = 0.0);
+        return;
+    }
     r.adjust = walk_policy(&imitation_obs(r))
         .iter()
         .map(|a| IMITATE_REACH * a.clamp(-1.0, 1.0))
