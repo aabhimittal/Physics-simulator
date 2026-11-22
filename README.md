@@ -200,18 +200,30 @@ clothes); the physics underneath is the same set of boxes.
 ## Car
 
 `src/vehicle.rs` is a raycast vehicle, the usual game-engine design: a rigid body in
-the `World` carried by four ray-cast spring-damper suspensions, with tyre forces from
-Pacejka's Magic Formula capped by the friction circle. Rear-wheel drive through an open
-differential from an engine with a torque curve (175 N·m at 4500 rpm, about 90 kW) and a
-five-speed automatic gearbox with a rev limiter; front-biased brakes with ABS; Ackermann
-steering; anti-roll bars; aero drag and rolling resistance. Each wheel's spin is stepped
-implicitly, since the tyre makes it stiff. Each wheel's ray finds the nearest surface of
-any body (ground, kerb, ramp, crate, log) and pushes back on it, so the car climbs ramps,
-jumps off them, bumps over the speed hump and shoves loose objects.
-`tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.1 m against the
-ideal v²/2μg = 39.3 m, 0-100 km/h in about 10 s with clean upshifts, sideways acceleration
-v²/r on its circle with under 4° of body roll, a wheel standing on a block, and a ramp jump
-that lands on its wheels.
+the `World` carried by four spring-damper suspensions, with tyre forces from Pacejka's Magic
+Formula capped by the friction circle. Front-wheel drive through an open differential from
+an engine with a torque curve (175 N·m at 4500 rpm, about 90 kW) and a five-speed automatic
+gearbox with a rev limiter; front-biased brakes with ABS; Ackermann steering; anti-roll bars;
+aero drag and rolling resistance. Each wheel's spin is stepped implicitly, since the tyre
+makes it stiff.
+
+- **Wheels are shape casts.** Each wheel sweeps a tyre-sized sphere down from its mount
+  (`sphere_cast`: a ray against every shape grown by the tyre's radius, so boxes get rounded
+  edges) and pushes back on whatever it finds: ground, kerb, ramp, crate, log. Meeting a kerb,
+  the tyre touches its corner ahead of its lowest point and rolls up over it, rising about
+  1 cm per cm of travel at first; the single ray it replaced found the kerb all at once and
+  jolted the wheel up 10 cm in one step.
+- **The gearbox shifts like an automatic**: its shift points follow the throttle (gently it
+  changes up from 2000 rpm, flat out near the red line; off the throttle it changes down near
+  idle), judged by road speed from the undriven wheels so wheelspin is not taken for revs.
+  With fixed shift points it waited for 6200 rpm whatever the throttle, so the autopilot
+  cruised at 50 km/h in first gear.
+
+`tests/vehicle.rs` checks it against textbook numbers: 100-0 km/h in 39.0 m against the
+ideal v²/2μg = 39.3 m, 0-100 km/h in 9.2 s with clean upshifts (about right for 90 kW; a
+Civic 1.5T has about 130 kW and does 7 s), sideways acceleration v²/r on its circle with
+under 4° of body roll, a wheel standing on a block, a 10 cm kerb, and a ramp jump that lands
+on its wheels.
 
 ### Checked against a real car (comma2k19)
 
@@ -240,18 +252,28 @@ Steering geometry alone (no tyre slip) is 0.0142 rad/s off. The committed test r
 of these drives and requires the highway yaw gain within 0.05 on average and 0.1 on each
 drive; with the old tyres it fails, 0.23 off. The autopilot now adds the
 steering an understeering car needs as speed rises (1 + 6·10⁻⁴·v²), as drivers learn to.
-Limits: comma2k19 has no pedal positions, so only the turning is checked, not the engine or
-brakes; slow, sharp turns read about 0.1 off, as the Civic Touring's variable-ratio steering
-is quicker near lock than the fixed 15.38:1 used here; the car is still rear-wheel drive,
-where the Civic is front-wheel drive, which with 39% of its weight on the rear wheels makes
-its launch traction-limited (0-100 km/h in 9.9 s, from 8 s before).
+Slow, sharp turns read about 0.1 off, as the Civic Touring's variable-ratio steering is
+quicker near lock than the fixed 15.38:1 used here.
+
+**Road load, from the EPA.** comma2k19 cannot check the engine or brakes: in its raw CAN
+logs the Civic's cruise control (openpilot) is engaged for most of each drive, the driver's
+gas pedal reads 0 even while the car speeds up, and the moments a person coasts with
+neither pedal are few, slow and mixed with the CVT's engine braking. What it cannot give, the
+EPA's coast-down test does: every US car is coasted down from speed in neutral, and the
+2016 Test Car List gives the Civic 4-door 1.5 L CVT a road load of 30.64 lbf - 0.0741 lbf/mph
+· v + 0.01821 lbf/mph² · v² at 3250 lb. `tests/vehicle.rs` runs the same test on the car:
+it coasts from 35 m/s and fits the force from its deceleration. Rolling resistance was 0.015
+(textbook) against the Civic's 0.0094, which includes drivetrain friction; drag was within
+4%. Both now come from the EPA figures (rolling 0.0094, Cd·A 0.675 m²), and the coast-down
+reads 0.0091 and 0.391 N/(m/s)² against 0.0094 and 0.405. The engine itself is still
+generic: a 90 kW, five-speed car, not the Civic's 130 kW turbo and CVT.
 
 In the browser it drives itself; arrow keys or WASD take over. It is drawn car-shaped
 (an extruded side profile with a glass cabin, rounded edges), with headlights and tail
 lights that light up with the simulated brake pedal, and the readout shows gear and rpm; the road has a
 dashed centre line and, in the crossing scene, a zebra crossing. It shows load transfer,
-body roll, understeer at full lock, and power oversteer (a steady drift) under full
-throttle in a bend.
+body roll, understeer that grows with speed, and the inside front wheel spinning under
+full throttle in a tight bend (an open differential sends the torque where grip is least).
 
 ### Crossing
 
@@ -270,12 +292,13 @@ toward someone in the way; it lifts off and lets the brakes do the rest.
 The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene with the
 brake pedal doing nothing, the car placed 125° back round the road at 50 km/h so it arrives
 just as the person is in its lane. The driver still sees them and lifts off, but coasting
-cannot stop it: it strikes them at about 45 km/h and slows as it passes them momentum. The
-timing is staged (starts from 110° to 145° back all lead to an impact); what follows is
+cannot stop it: it strikes them at about 46 km/h and slows as it passes them momentum. The
+timing is staged (starts from 105° to 140° back all lead to an impact); what follows is
 not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
-Limits: a wheel is a single ray, so it meets a kerb's edge by snapping up onto it rather
-than rolling over the corner (a shape cast is the upgrade); the gearbox is automatic only.
+Limits: the swept sphere is as wide as the tyre is tall, so it can touch a box up to 0.33 m
+to the side of the wheel, where a real 0.2 m tyre would miss it (a cylinder cast is the
+upgrade); the gearbox is automatic only.
 
 ## Implicit joint damping
 

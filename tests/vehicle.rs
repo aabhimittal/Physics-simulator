@@ -87,6 +87,7 @@ fn abs_braking_stops_in_the_distance_friction_allows() {
 #[test]
 fn autopilot_corners_on_its_circle_with_the_right_sideways_acceleration() {
     let mut w = scenes::load(CAR_SCENE);
+    let (mut last_bump, mut checked) = (0, 0);
     for frame in 0..(40.0 / DT) as usize {
         w.step(DT);
         let (b, car) = (&w.bodies[w.cars[0].body], &w.cars[0]);
@@ -96,8 +97,18 @@ fn autopilot_corners_on_its_circle_with_the_right_sideways_acceleration() {
             "{off:.2} m off the circle at t = {:.1}",
             car.time
         );
-        // At steady speed the sideways acceleration is v² / r.
-        if frame % 960 == 420 {
+        // The speed hump on the circle jolts the readout; measure away from it.
+        if car
+            .wheels
+            .iter()
+            .any(|wheel| wheel.ground.is_some_and(|g| g != 0))
+        {
+            last_bump = frame;
+        }
+        // At steady speed the sideways acceleration is v² / r: once per 16 s lap of the
+        // autopilot's speed cycle, at least half a second clear of the hump.
+        if frame % 960 >= 420 && frame / 960 >= checked && frame - last_bump > 30 {
+            checked = frame / 960 + 1;
             let expected = b.vel.length_squared() / 30.0;
             let measured = car.accel.length();
             assert!(
@@ -113,6 +124,7 @@ fn autopilot_corners_on_its_circle_with_the_right_sideways_acceleration() {
             assert!(roll < 4.0, "{roll:.1}° of body roll");
         }
     }
+    assert_eq!(checked, 3, "measured on {checked} laps of 3");
 }
 
 #[test]
@@ -149,6 +161,40 @@ fn car_stops_for_people_crossing_and_drives_on() {
         driven > 250.0,
         "the car only drove {driven:.0} m in a minute"
     );
+}
+
+#[test]
+fn gentle_throttle_shifts_up_early_and_braking_does_not_drop_to_first() {
+    // An automatic picks its shift points by how hard the driver presses: gently, it changes
+    // up at low revs. It used to wait for 6200 rpm whatever the throttle, so the autopilot
+    // cruised at 50 km/h in first gear.
+    let mut w = car_at(8.0);
+    while w.bodies[1].vel.x < 15.0 {
+        w.cars[0].throttle = 0.3;
+        w.step(DT);
+        assert!(w.cars[0].time < 30.0, "never reached 15 m/s");
+    }
+    let car = &w.cars[0];
+    assert!(
+        car.gear >= 3,
+        "gear {} at 15 m/s on light throttle",
+        car.gear
+    );
+    assert!(car.rpm < 3500.0, "{:.0} rpm on light throttle", car.rpm);
+    // Braking from 25 m/s: the box follows the road speed down a gear at a time, never
+    // revving the engine up through a low gear.
+    let mut w = car_at(25.0);
+    w.cars[0].gear = 5;
+    while w.bodies[1].vel.x > 10.0 {
+        w.cars[0].brake = 0.6;
+        w.step(DT);
+        assert!(
+            w.cars[0].rpm < 3000.0,
+            "{:.0} rpm while braking",
+            w.cars[0].rpm
+        );
+    }
+    assert!(w.cars[0].gear >= 3, "gear {} at 10 m/s", w.cars[0].gear);
 }
 
 #[test]
@@ -207,6 +253,42 @@ fn a_wheel_on_a_block_stands_on_it() {
         "body not tilted away from the block: up = {up:?}"
     );
     assert!(b.vel.length() < 0.05, "not at rest on the block");
+}
+
+#[test]
+fn wheels_roll_over_a_kerb_instead_of_snapping_onto_it() {
+    // A 10 cm kerb across the road, met at 2 m/s. A tyre meets the kerb's corner ahead of its
+    // lowest point and rolls up over it: the wheel rises about 1 cm per cm of travel at
+    // first, a few cm a frame. A single ray straight down would find the kerb all at once and
+    // jolt the wheel up the whole 10 cm in one step.
+    let mut w = car_at(2.0);
+    w.add(Body::new(
+        Shape::Box(Vec3::new(1.0, 0.05, 3.0)),
+        0.0,
+        Vec3::new(5.0, 0.05, 30.0),
+    ));
+    let (mut jump, mut last) = (0f64, w.cars[0].wheels[0].length);
+    for _ in 0..(5.0 / DT) as usize {
+        w.cars[0].throttle = 0.25;
+        w.step(DT);
+        let wheel = &w.cars[0].wheels[0];
+        jump = jump.max((last - wheel.length).abs());
+        last = wheel.length;
+    }
+    println!(
+        "biggest suspension change in a frame {:.1} cm",
+        jump * 100.0
+    );
+    assert!(
+        w.bodies[1].pos.x > 7.0,
+        "did not get over the kerb (x = {:.1})",
+        w.bodies[1].pos.x
+    );
+    assert!(
+        jump < 0.05,
+        "wheel jumped {:.1} cm in one frame",
+        jump * 100.0
+    );
 }
 
 #[test]
@@ -426,4 +508,45 @@ fn turns_like_a_real_civic_on_recorded_drives() {
     );
     // And the tyre model must predict the yaw rate better than steering geometry alone.
     assert!(tyres < 0.8 * geometry, "{tyres:.3} against {geometry:.3}");
+}
+
+#[test]
+fn coasts_down_like_the_epas_civic() {
+    // Every US car is coast-down tested: from speed, in neutral, on a flat track, and the
+    // deceleration gives its road load F(v) = A + B·v + C·v². The EPA's 2016 Test Car List
+    // has the 2016 Civic 4-door, 1.5 L CVT (the comma2k19 car's drivetrain) at
+    // A = 30.64 lbf, B = -0.0741 lbf/mph, C = 0.01821 lbf/mph², test weight 3250 lb.
+    // Rolling resistance scales with weight, so compare it as a coefficient, A / (m·g);
+    // drag does not, so compare C as a force.
+    let (lbf, mph) = (4.448_222, 0.447_04);
+    let civic_rolling = 30.64 * lbf / (3250.0 * 0.453_592 * 9.81);
+    let civic_drag = 0.01821 * lbf / (mph * mph);
+    // The same test on the car: coast from 35 m/s with no throttle, and fit F = m·a.
+    let mut w = car_at(35.0);
+    let mass = 1.0 / w.bodies[1].inv_mass;
+    let (mut v2, mut force) = (vec![], vec![]);
+    let mut last = w.bodies[1].vel.x;
+    while w.bodies[1].vel.x > 8.0 {
+        for _ in 0..30 {
+            w.step(DT);
+        }
+        let v = w.bodies[1].vel.x;
+        v2.push(((v + last) / 2.0).powi(2));
+        force.push(mass * (last - v) / (30.0 * DT));
+        last = v;
+    }
+    let drag = slope(&v2, &force);
+    let n = v2.len() as f64;
+    let rolling = (force.iter().sum::<f64>() - drag * v2.iter().sum::<f64>()) / n / (mass * 9.81);
+    println!(
+        "rolling resistance {rolling:.4} (Civic {civic_rolling:.4}); drag {drag:.3} N/(m/s)² (Civic {civic_drag:.3})"
+    );
+    assert!(
+        (rolling - civic_rolling).abs() < 0.15 * civic_rolling,
+        "rolling {rolling:.4}"
+    );
+    assert!(
+        (drag - civic_drag).abs() < 0.1 * civic_drag,
+        "drag {drag:.3}"
+    );
 }

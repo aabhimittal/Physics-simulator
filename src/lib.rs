@@ -19,7 +19,7 @@ pub mod scenes;
 pub mod vehicle;
 
 use collide::Contact;
-pub use collide::{Hit, penetration, raycast};
+pub use collide::{Hit, penetration, raycast, sphere_cast};
 
 /// Bodies slower than this (m/s, rad/s) for `SLEEP_AFTER` seconds fall asleep.
 /// Without sleeping, solver noise makes resting piles creep a few mm per second.

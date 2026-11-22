@@ -234,3 +234,29 @@ fn ray_down_onto_a_lying_capsule_hits_its_top() {
             .unwrap();
     assert_eq!(hit.body, 0);
 }
+
+#[test]
+fn a_swept_sphere_meets_a_boxs_face_flat_and_its_edge_rounded() {
+    // A 2 x 1 x 2 m box, and a 0.5 m sphere swept straight down past it.
+    let bodies = [Body::new(Shape::Box(dvec3(1.0, 0.5, 1.0)), 0.0, Vec3::ZERO)];
+    let cast =
+        |x: f64| physics_simulator::sphere_cast(&bodies, dvec3(x, 3.0, 0.0), -Vec3::Y, 0.5, 5.0, 9);
+    // Over the top face: it stops with its centre 0.5 m above it.
+    let face = cast(0.5).expect("missed the face");
+    assert!((face.distance - 2.0).abs() < 1e-9 && (face.normal - Vec3::Y).length() < 1e-9);
+    // 0.2 m beyond the edge it still lands on the edge, lower, its normal leaning out:
+    // centre at height 0.5 + √(0.5² - 0.2²).
+    let edge = cast(1.2).expect("missed the edge");
+    let height = 0.5 + (0.25f64 - 0.04).sqrt();
+    assert!(
+        (edge.distance - (3.0 - height)).abs() < 1e-9,
+        "{}",
+        edge.distance
+    );
+    assert!((edge.normal - dvec3(0.2, height - 0.5, 0.0) / 0.5).length() < 1e-9);
+    // More than its radius beyond the edge, it misses.
+    assert!(cast(1.6).is_none());
+    // A plain ray (radius 0) is unchanged by the rounding.
+    let ray = physics_simulator::raycast(&bodies, dvec3(0.99, 3.0, 0.0), -Vec3::Y, 5.0, 9);
+    assert!((ray.expect("ray missed").distance - 2.5).abs() < 1e-9);
+}
