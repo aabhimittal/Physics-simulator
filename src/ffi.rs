@@ -300,7 +300,7 @@ pub extern "C" fn walker(field: u32) -> f64 {
 /// Walking scene: the pace to walk at (m/s); 0 stands still.
 #[unsafe(no_mangle)]
 pub extern "C" fn set_pace(speed: f64) {
-    with(|s| s.pace = speed.clamp(0.0, 2.0))
+    with(|s| s.pace = speed.clamp(0.0, crate::env::WALKING_PACE.1))
 }
 
 /// Index in `state()`'s list of the robot's first link: it is drawn after the world's

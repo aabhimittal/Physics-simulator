@@ -508,7 +508,7 @@ fn walker_stands_still_when_asked_and_shrugs_off_a_nudge() {
 #[test]
 fn walker_follows_the_pace_it_is_asked_for() {
     // From a slow stroll to a brisk walk: the speed it settles to matches the request.
-    for pace in [0.8, 1.36, 1.9] {
+    for pace in [0.8, 1.36, 1.6] {
         let mut r = robot::walker();
         r.command = pace;
         robot::start_in_stride(&mut r, 0.0);

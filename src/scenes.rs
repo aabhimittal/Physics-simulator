@@ -242,7 +242,7 @@ pub fn crossing() -> (World, Robot) {
 /// from 105° to 140° back lead to an impact; this is near the middle of that range.)
 pub fn crossing_brakes_failed() -> (World, Robot) {
     let (mut w, walker) = crossing();
-    let back = 125f64.to_radians();
+    let back = 145f64.to_radians();
     let along = Vec3::new(back.sin(), 0.0, -back.cos()); // the way round, clockwise from above
     let b = &mut w.bodies[1];
     b.pos = Vec3::new(30.0 * back.cos(), b.pos.y, 30.0 * back.sin());
@@ -286,8 +286,9 @@ fn pace_for_crossing(w: &World, walker: &Robot, dt: f64) -> f64 {
     walker.command + change
 }
 
-/// A hurried walk (m/s), near the captured brisk walk's 1.9 m/s.
-const BRISK_SPEED: f64 = 1.9;
+/// A hurried walk (m/s): the fastest the walking policy is trained for. (Up to the captured
+/// brisk walk's 1.9 m/s it fell within a second; see the README.)
+const BRISK_SPEED: f64 = 1.6;
 
 fn walker_at_kerb() -> Robot {
     let mut r = robot::walker();

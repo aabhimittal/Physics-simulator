@@ -21,7 +21,7 @@ pub enum Task {
     /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
     /// controller's joint targets. Observation and action are in stance/swing order (see
     /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
-    /// the speed asked for, which changes now and then between 0.6 and 2 m/s; a quarter of
+    /// the speed asked for, which changes now and then between 0.6 and 1.6 m/s; a quarter of
     /// episodes start standing still.
     Imitate,
 }
@@ -31,7 +31,7 @@ pub enum Task {
 pub const IMITATE_ACTIONS: usize = 6;
 pub const IMITATE_REACH: f64 = 0.3;
 /// The paces (m/s) the walking policy is trained for.
-pub const WALKING_PACE: (f64, f64) = (robot::SLOWEST_WALK, 2.0);
+pub const WALKING_PACE: (f64, f64) = (robot::SLOWEST_WALK, 1.6);
 
 /// Result of one `Env::step`.
 pub struct Step {
@@ -122,7 +122,7 @@ impl Env {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
                 r.adjust = vec![0.0; IMITATE_ACTIONS];
-                // At any walking pace up to a brisk 2 m/s, or a quarter of the time from
+                // At any walking pace up to a brisk 1.6 m/s, or a quarter of the time from
                 // standing still, to learn to step off.
                 if rng.uniform() < -0.5 {
                     r.command = 0.0;

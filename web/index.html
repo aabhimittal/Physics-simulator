@@ -85,7 +85,7 @@
     <span id="pace" class="row" role="group" aria-label="Walking pace" hidden>
       <button type="button" data-pace="0" aria-pressed="false">Stand</button>
       <button type="button" data-pace="1.36" aria-pressed="true">Walk</button>
-      <button type="button" data-pace="1.9" aria-pressed="false">Hurry</button>
+      <button type="button" data-pace="1.6" aria-pressed="false">Hurry</button>
     </span>
     <button id="pause" type="button">Pause</button>
     <button id="reset" type="button">Reset</button>
@@ -391,7 +391,7 @@ function sync() {
     : SCENES[current].crossing
     ? `Car ${wasm.car(0).toFixed(0)} km/h · ${wasm.car(9) ? (wasm.car(5) ? 'BRAKES FAILED, coasting toward the person crossing' : 'brakes failed')
       : wasm.car(5) ? 'braking for the person crossing' : 'road clear, driving on'}`
-      + ` · person ${wasm.walker(4) ? 'waiting at the kerb' : wasm.walker(3) > 1.6 ? 'hurrying' : 'walking'}`
+      + ` · person ${wasm.walker(4) ? 'waiting at the kerb' : wasm.walker(3) > 1.5 ? 'hurrying' : 'walking'}`
     : SCENES[current].walking
     ? (wasm.walker(4) ? `Standing still · ${wasm.walker(1)} steps taken`
       : `Walking, asked for ${wasm.walker(3).toFixed(2)} m/s · ${wasm.walker(1)} steps taken`)
