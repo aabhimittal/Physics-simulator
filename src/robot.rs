@@ -1257,7 +1257,10 @@ pub fn mimic_walk(r: &mut Robot) {
     if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && r.qd[0].abs() < 0.8 {
         r.memory[4] = 1.0;
     } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
-        (r.memory[1], r.memory[3], r.memory[4]) = (r.time, f64::INFINITY, 0.0);
+        // Step off with the rear foot: the front one is the stance foot, which puts the
+        // walker in the capture's pose at a heel strike, the start of a step.
+        let front = (frames[WALKER_HIPS[1] + 2].0.x > frames[WALKER_HIPS[0] + 2].0.x) as usize;
+        r.memory = [front as f64, r.time, r.memory[2], f64::INFINITY, 0.0];
     }
     if r.memory[4] == 1.0 {
         return stand(r);
@@ -1310,10 +1313,17 @@ fn stand(r: &mut Robot) {
     let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
     let mut torque = vec![0.0; r.q.len()];
+    let apart = (frames[WALKER_HIPS[0] + 2].0.x - frames[WALKER_HIPS[1] + 2].0.x).abs() > 0.15;
     for &hip in &WALKER_HIPS {
-        // Each hip holds its thigh vertical in the world and shares holding the torso up.
-        torque[hip] = pd(pitch + r.q[hip], pitch_rate + r.qd[hip], 0.0, 400.0)
-            - 0.5 * pd(pitch, pitch_rate, MIMIC.lean, 600.0);
+        // The hips share holding the torso upright. Feet together, each also holds its thigh
+        // vertical; feet apart (stopped mid-stride) the legs stay planted where the last step
+        // left them, knees straight, an A-frame, the hips only damping their swing.
+        let leg = if apart {
+            -20.0 * r.qd[hip]
+        } else {
+            pd(pitch + r.q[hip], pitch_rate + r.qd[hip], 0.0, 400.0)
+        };
+        torque[hip] = leg - 0.5 * pd(pitch, pitch_rate, MIMIC.lean, 600.0);
         torque[hip + 1] = pd(r.q[hip + 1], r.qd[hip + 1], -0.05, 600.0);
         torque[hip + 2] = pd(r.q[hip + 2], r.qd[hip + 2], lean, 400.0);
     }

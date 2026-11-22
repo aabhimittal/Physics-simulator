@@ -122,16 +122,23 @@ impl Env {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
                 r.adjust = vec![0.0; IMITATE_ACTIONS];
-                // At any walking pace up to a brisk 1.6 m/s, or a quarter of the time from
-                // standing still, to learn to step off.
-                if rng.uniform() < -0.5 {
+                // At any walking pace up to a brisk 1.6 m/s, anywhere in the stride; or, to
+                // learn to step off, standing still: 15% of the time feet together, 15% stopped
+                // mid-stride (feet apart, as `robot::mimic_walk` stands after walking).
+                let pace = |rng: &mut Rng| {
+                    WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform())
+                };
+                let start = rng.uniform();
+                if start < -0.7 {
                     r.command = 0.0;
                     robot::start_in_stride(&mut r, 0.0);
-                    r.command = WALKING_PACE.0
-                        + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform());
+                    r.command = pace(&mut rng);
+                } else if start < -0.4 {
+                    r.command = pace(&mut rng);
+                    robot::start_in_stride(&mut r, 0.0);
+                    r.qd.iter_mut().for_each(|v| *v = 0.0);
                 } else {
-                    r.command = WALKING_PACE.0
-                        + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform());
+                    r.command = pace(&mut rng);
                     robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
                 }
                 self.pace = r.command;
@@ -244,9 +251,9 @@ impl Env {
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
                 let pose = (-10.0 * robot::imitation_error(r)).exp();
-                let speed = (-4.0 * (r.qd[0] - r.command).powi(2)).exp();
+                let speed = (-8.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
-                    0.7 * pose + 0.3 * speed,
+                    0.6 * pose + 0.4 * speed,
                     r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }
