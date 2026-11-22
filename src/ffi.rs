@@ -18,11 +18,13 @@ struct State {
     out: Vec<f32>,
     /// Body held by the mouse. Its drag joint is always the last joint.
     grabbed: Option<usize>,
+    /// Walking scene: the pace the page asks the walker for (m/s), eased toward each frame.
+    pace: f64,
 }
 
 thread_local! {
     static STATE: RefCell<State> =
-        RefCell::new(State { world: scenes::load(0), robot: None, learner: None, player: None, out: Vec::new(), grabbed: None });
+        RefCell::new(State { world: scenes::load(0), robot: None, learner: None, player: None, out: Vec::new(), grabbed: None, pace: robot::WALKING_SPEED });
 }
 
 fn with<T>(f: impl FnOnce(&mut State) -> T) -> T {
@@ -46,6 +48,7 @@ pub extern "C" fn load(scene: u32) {
             (s.world, s.robot) = (world, Some(walker));
         }
         s.grabbed = None;
+        s.pace = robot::WALKING_SPEED;
     })
 }
 
@@ -56,8 +59,12 @@ pub extern "C" fn step(dt: f64) {
         None if s.learner.is_some() => s.learner.as_mut().unwrap().tick(),
         None if s.player.is_some() => s.player.as_mut().unwrap().tick(),
         Some(r) if !s.world.cars.is_empty() => scenes::step_crossing(&mut s.world, r, dt),
-        // Ground contact is stiff, so robots that touch the floor take smaller steps.
-        Some(r) => r.step(dt, if r.ground { 16 } else { 8 }),
+        // Ground contact is stiff, so robots that touch the floor take smaller steps. The
+        // walker's pace eases toward the page's request at 0.8 m/s², as it was trained to.
+        Some(r) => {
+            r.command += (s.pace - r.command).clamp(-0.8 * dt, 0.8 * dt);
+            r.step(dt, if r.ground { 16 } else { 8 })
+        }
         None => s.world.step(dt),
     })
 }
@@ -271,7 +278,8 @@ pub extern "C" fn car(field: u32) -> f64 {
     })
 }
 
-/// Walking scene readout: `[average speed m/s, steps taken, steps per second]`.
+/// Walker readout: `[average speed m/s, steps taken, steps per second, pace asked for m/s,
+/// standing (1) or walking (0), speed now m/s]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn walker(field: u32) -> f64 {
     with(|s| {
@@ -280,10 +288,19 @@ pub extern "C" fn walker(field: u32) -> f64 {
             match field {
                 0 => r.q[0] / time,
                 1 => r.memory[2],
-                _ => r.memory[2] / time,
+                2 => r.memory[2] / time,
+                3 => r.command,
+                4 => r.memory[4],
+                _ => r.qd[0],
             }
         })
     })
+}
+
+/// Walking scene: the pace to walk at (m/s); 0 stands still.
+#[unsafe(no_mangle)]
+pub extern "C" fn set_pace(speed: f64) {
+    with(|s| s.pace = speed.clamp(0.0, 2.0))
 }
 
 /// Index in `state()`'s list of the robot's first link: it is drawn after the world's

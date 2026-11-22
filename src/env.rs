@@ -21,7 +21,8 @@ pub enum Task {
     /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
     /// controller's joint targets. Observation and action are in stance/swing order (see
     /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
-    /// the speed asked for, which changes now and then, from standing still to 2 m/s.
+    /// the speed asked for, which changes now and then between 0.6 and 2 m/s; a quarter of
+    /// episodes start standing still.
     Imitate,
 }
 
@@ -29,6 +30,8 @@ pub enum Task {
 /// knee and ankle; each up to `IMITATE_REACH` radians either way.
 pub const IMITATE_ACTIONS: usize = 6;
 pub const IMITATE_REACH: f64 = 0.3;
+/// The paces (m/s) the walking policy is trained for.
+pub const WALKING_PACE: (f64, f64) = (robot::SLOWEST_WALK, 2.0);
 
 /// Result of one `Env::step`.
 pub struct Step {
@@ -119,10 +122,19 @@ impl Env {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
                 r.adjust = vec![0.0; IMITATE_ACTIONS];
-                // At any pace from standing still to a brisk 2 m/s.
-                r.command = 1.0 + rng.uniform();
+                // At any walking pace up to a brisk 2 m/s, or a quarter of the time from
+                // standing still, to learn to step off.
+                if rng.uniform() < -0.5 {
+                    r.command = 0.0;
+                    robot::start_in_stride(&mut r, 0.0);
+                    r.command = WALKING_PACE.0
+                        + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform());
+                } else {
+                    r.command = WALKING_PACE.0
+                        + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform());
+                    robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
+                }
                 self.pace = r.command;
-                robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
             }
             Task::Reach => {
                 let target = Vec3::new(
@@ -181,11 +193,12 @@ impl Env {
         let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
         if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
-            // About every three seconds, asked for a new pace (from standing to 2 m/s), which
-            // the request ramps to at 0.8 m/s², about as quickly as people change pace: so it
-            // learns to start, stop, speed up and slow down.
+            // About every three seconds, asked for a new pace, which the request ramps to at
+            // 0.8 m/s², about as quickly as people change pace: so it learns to speed up and
+            // slow down. (Stopping is a separate standing controller, `robot::mimic_walk`.)
             if self.rng.uniform() > 1.0 - 1.0 / 90.0 {
-                self.pace = 1.0 + self.rng.uniform();
+                let u = 0.5 + 0.5 * self.rng.uniform();
+                self.pace = WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * u;
             }
             let change = self.pace - self.robot.command;
             self.robot.command += change.clamp(-0.8 * Self::DT, 0.8 * Self::DT);

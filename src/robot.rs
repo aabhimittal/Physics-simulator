@@ -81,7 +81,7 @@ const LIMIT_STIFFNESS: f64 = 2.0e4;
 const LIMIT_DAMPING: f64 = 200.0;
 const GROUND_STIFFNESS: f64 = 3.0e4;
 const GROUND_DAMPING: f64 = 300.0;
-const GROUND_GRIP: f64 = 2000.0;
+const GROUND_GRIP: f64 = 20000.0; // stiff enough that a foot standing still does not creep
 const GROUND_FRICTION: f64 = 1.0;
 
 /// A force applied at world point `at` on link `link`.
@@ -113,9 +113,10 @@ pub struct Robot {
     /// Where the controller is trying to go, for display.
     pub target: Option<Vec3>,
     /// Whatever the controller needs to remember between calls. The walker keeps its
-    /// stance leg (0 or 1), when the current step began, how many steps it has taken, and
-    /// when it began reaching for the ground with the swing foot (infinite until it does).
-    pub memory: [f64; 4],
+    /// stance leg (0 or 1), when the current step began, how many steps it has taken, when
+    /// it began reaching for the ground with the swing foot (infinite until it does), and
+    /// whether it is standing still (1) rather than walking (0).
+    pub memory: [f64; 5],
     pub pull: Option<Pull>,
     /// Whether the links collide with the floor at y = 0.
     pub ground: bool,
@@ -141,7 +142,7 @@ impl Robot {
             time: 0.0,
             controller: None,
             target: None,
-            memory: [0.0, 0.0, 0.0, f64::INFINITY],
+            memory: [0.0, 0.0, 0.0, f64::INFINITY, 0.0],
             pull: None,
             ground: false,
             external: Vec::new(),
@@ -985,26 +986,27 @@ fn reference(phase: f64, speed: f64) -> ([f64; 11], f64) {
 
 /// How far through its step the walker is, at its commanded speed's step length in time.
 fn phase(r: &Robot) -> f64 {
-    (r.time - r.memory[1]) / reference(0.0, r.command).1
+    (r.time - r.memory[1]) / reference(0.0, pace(r)).1
 }
+
+/// The pace the walking controller works to: the command, but never below SLOWEST_WALK. To
+/// stop, the walker slows to that and then stands (`mimic_walk`).
+fn pace(r: &Robot) -> f64 {
+    r.command.max(SLOWEST_WALK)
+}
+
+/// Slowest walking pace (m/s), and the commanded speed below which the walker stops and
+/// stands once both feet are down, or above which it steps off again.
+pub const SLOWEST_WALK: f64 = 0.6;
+const STOP_BELOW: f64 = 0.3;
 
 /// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk.
 pub fn imitate(r: &mut Robot) {
     let m = MIMIC;
-    let [stance_side, _, steps, mut landing_start] = r.memory;
+    let [stance_side, _, steps, mut landing_start, _] = r.memory;
     let side = stance_side as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
     let frames = r.frames(&r.q);
-    let sole = |foot: usize| {
-        let (o, rot) = frames[foot];
-        let l = &r.links[foot];
-        (0..4)
-            .map(|k| {
-                o + rot
-                    * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1]))
-            })
-            .fold(f64::INFINITY, |low, p| low.min(p.y))
-    };
     // Standing still, no step ends; when asked to walk again, start a fresh one.
     if phase(r) > 1.5 {
         r.memory[1] = r.time;
@@ -1014,17 +1016,17 @@ pub fn imitate(r: &mut Robot) {
     // The trailing foot is still down early in a step (double support): only once it has
     // lifted, late in the step, can its landing end the step.
     if landing_start.is_infinite()
-        && sole(swing + 2) > 0.01
+        && sole_height(r, &frames, swing + 2) > 0.01
         && (phase > m.reach || r.q[WALKER_TORSO] + r.q[stance] < -STANCE_BEHIND)
     {
         landing_start = r.time;
         r.memory[3] = r.time;
     }
-    if r.time > landing_start && sole(swing + 2) < 0.005 {
-        r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY];
+    if r.time > landing_start && sole_height(r, &frames, swing + 2) < 0.005 {
+        r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY, 0.0];
         return imitate(r);
     }
-    let mut refs = reference(phase + m.lead, r.command).0;
+    let mut refs = reference(phase + m.lead, pace(r)).0;
     // The policy's corrections, if any: torso, swing hip, knee, ankle, stance knee, ankle.
     for (k, a) in [0, 4, 5, 6, 2, 3].into_iter().zip(&r.adjust) {
         refs[k] += a;
@@ -1042,23 +1044,12 @@ pub fn imitate(r: &mut Robot) {
         s1,
         e1,
     ] = refs;
-    let total: f64 = r.links.iter().map(|l| l.mass).sum();
-    let (com, com_vel) = {
-        let vel = r.velocities(&frames, &r.qd);
-        r.links.iter().zip(&frames).zip(&vel).fold(
-            (Vec3::ZERO, Vec3::ZERO),
-            |(p, v), ((l, (o, rot)), (w, vo))| {
-                let rc = *rot * l.com;
-                (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
-            },
-        )
-    };
-    let (com, com_vel) = (com / total, com_vel / total);
+    let (com, com_vel) = centre_of_mass(r, &frames);
     let ankle = frames[stance + 2].0;
     let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
     let aim =
-        swing_hip + m.distance_gain * (com.x - ankle.x) + m.speed_gain * (com_vel.x - r.command);
+        swing_hip + m.distance_gain * (com.x - ankle.x) + m.speed_gain * (com_vel.x - pace(r));
     let swing_torque = pd(
         pitch + r.q[swing],
         pitch_rate + r.qd[swing],
@@ -1070,7 +1061,7 @@ pub fn imitate(r: &mut Robot) {
     torque[swing] = swing_torque;
     torque[stance] = -torso - swing_torque;
     torque[swing + 1] = pd(r.q[swing + 1], r.qd[swing + 1], swing_knee, m.swing_gain);
-    let swing_ankle_gain = if sole(swing + 2) < 0.005 {
+    let swing_ankle_gain = if sole_height(r, &frames, swing + 2) < 0.005 {
         m.ankle_stiffness
     } else {
         30.0
@@ -1177,7 +1168,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
     {
         (r.q[joint], r.qd[joint]) = (now[k], rate(k));
     }
-    r.memory = [0.0, r.time - phase * seconds, 0.0, f64::INFINITY];
+    r.memory = [0.0, r.time - phase * seconds, 0.0, f64::INFINITY, 0.0];
     r.q[1] = 0.0;
     let frames = r.frames(&r.q);
     let low = [stance + 2, swing + 2]
@@ -1202,7 +1193,7 @@ pub fn imitation_error(r: &Robot) -> f64 {
     let m = MIMIC;
     let side = r.memory[0] as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
-    let refs = reference(phase(r), r.command).0;
+    let refs = reference(phase(r), pace(r)).0;
     let pitch = r.q[WALKER_TORSO];
     let have = [
         pitch - m.lean,
@@ -1239,7 +1230,7 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
         r.qd[0],
         r.q[WALKER_TORSO],
         0.1 * r.qd[WALKER_TORSO],
-        r.command,
+        pace(r),
     ]
     .into_iter()
     .chain(joints.iter().map(|&j| r.q[j]))
@@ -1257,9 +1248,85 @@ pub fn mimic_walk(r: &mut Robot) {
         r.ctrl.iter_mut().for_each(|c| *c = 0.0);
         return;
     }
+    // Asked to stop: once slowed to a walk's slowest and both feet are down, stand. Asked to
+    // go: step off again, the policy taking over from standing (which it was trained on).
+    let frames = r.frames(&r.q);
+    let both_down = WALKER_HIPS
+        .iter()
+        .all(|&hip| sole_height(r, &frames, hip + 2) < 0.01);
+    if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && r.qd[0].abs() < 0.8 {
+        r.memory[4] = 1.0;
+    } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
+        (r.memory[1], r.memory[3], r.memory[4]) = (r.time, f64::INFINITY, 0.0);
+    }
+    if r.memory[4] == 1.0 {
+        return stand(r);
+    }
     r.adjust = walk_policy(&imitation_obs(r))
         .iter()
         .map(|a| IMITATE_REACH * a.clamp(-1.0, 1.0))
         .collect();
     imitate(r);
 }
+
+/// Height of the lowest corner of `foot`'s box.
+fn sole_height(r: &Robot, frames: &[(Vec3, Quat)], foot: usize) -> f64 {
+    let (o, rot) = frames[foot];
+    let l = &r.links[foot];
+    (0..4)
+        .map(|k| {
+            (o + rot * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1])))
+                .y
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The whole body's centre of mass and its velocity.
+fn centre_of_mass(r: &Robot, frames: &[(Vec3, Quat)]) -> (Vec3, Vec3) {
+    let total: f64 = r.links.iter().map(|l| l.mass).sum();
+    let vel = r.velocities(frames, &r.qd);
+    let (p, v) = r.links.iter().zip(frames).zip(&vel).fold(
+        (Vec3::ZERO, Vec3::ZERO),
+        |(p, v), ((l, (o, rot)), (w, vo))| {
+            let rc = *rot * l.com;
+            (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
+        },
+    );
+    (p / total, v / total)
+}
+
+/// Standing still on both feet, as people do: legs straight and torso upright, and the
+/// ankles keeping the centre of mass over the middle of the feet (the "ankle strategy"),
+/// leaning the shins back when it drifts ahead and forward when it drifts behind.
+fn stand(r: &mut Robot) {
+    let frames = r.frames(&r.q);
+    let (com, com_vel) = centre_of_mass(r, &frames);
+    let middle = WALKER_HIPS
+        .iter()
+        .map(|&hip| frames[hip + 2].0.x + 0.05) // the ankle, and the foot's centre ahead of it
+        .sum::<f64>()
+        / 2.0;
+    let lean = STAND_LEAN.0 * (com.x - middle) + STAND_LEAN.1 * com_vel.x;
+    let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
+    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
+    let mut torque = vec![0.0; r.q.len()];
+    for &hip in &WALKER_HIPS {
+        // Each hip holds its thigh vertical in the world and shares holding the torso up.
+        torque[hip] = pd(pitch + r.q[hip], pitch_rate + r.qd[hip], 0.0, 400.0)
+            - 0.5 * pd(pitch, pitch_rate, MIMIC.lean, 600.0);
+        torque[hip + 1] = pd(r.q[hip + 1], r.qd[hip + 1], -0.05, 600.0);
+        torque[hip + 2] = pd(r.q[hip + 2], r.qd[hip + 2], lean, 400.0);
+    }
+    for shoulder in SHOULDERS {
+        torque[shoulder] = pd(r.q[shoulder], r.qd[shoulder], 0.0, 60.0);
+        torque[shoulder + 1] = pd(r.q[shoulder + 1], r.qd[shoulder + 1], 0.2, 30.0);
+    }
+    for (i, t) in torque.iter().enumerate().skip(WALKER_TORSO + 1) {
+        r.ctrl[i] = t / r.links[i].gear;
+    }
+    r.target = Some(Vec3::new(com.x, 0.02, com.z));
+}
+
+/// The ankle strategy's gains: ankle angle per metre the centre of mass is ahead of the
+/// feet, and per m/s it moves (negative: toe down, which tips the shins back).
+const STAND_LEAN: (f64, f64) = (-4.0, -1.0);
