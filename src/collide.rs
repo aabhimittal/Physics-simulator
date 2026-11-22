@@ -307,6 +307,22 @@ pub struct Hit {
 /// The nearest body surface along the ray from `from` in unit direction `dir`, within `max`,
 /// ignoring body `skip`. A ray starting inside a body does not hit it.
 pub fn raycast(bodies: &[Body], from: Vec3, dir: Vec3, max: f64, skip: usize) -> Option<Hit> {
+    sphere_cast(bodies, from, dir, 0.0, max, skip)
+}
+
+/// A sphere of radius `radius` swept from `from` along unit `dir`: where its centre is when
+/// it first touches a body, within `max`, ignoring body `skip`. The normal points from the
+/// touching point to the centre, so over a box's edge it tilts, and a wheel rolls over the
+/// corner instead of snapping up onto it. (Sweeping a sphere is a ray against every shape
+/// grown by the radius: planes rise, spheres and capsules fatten, boxes get rounded edges.)
+pub fn sphere_cast(
+    bodies: &[Body],
+    from: Vec3,
+    dir: Vec3,
+    radius: f64,
+    max: f64,
+    skip: usize,
+) -> Option<Hit> {
     let mut best: Option<Hit> = None;
     for (i, b) in bodies.iter().enumerate() {
         if i == skip {
@@ -315,29 +331,12 @@ pub fn raycast(bodies: &[Body], from: Vec3, dir: Vec3, max: f64, skip: usize) ->
         let hit = match b.shape {
             // The plane is the half space below the body's height.
             Shape::Plane => {
-                let t = (from.y - b.pos.y) / -dir.y;
+                let t = (from.y - b.pos.y - radius) / -dir.y;
                 (dir.y < 0.0 && t >= 0.0).then_some((t, Vec3::Y))
             }
-            Shape::Sphere(r) => ray_sphere(from - b.pos, dir, r),
-            Shape::Capsule(r, half) => ray_capsule(from, dir, segment(b), r, half),
-            Shape::Box(h) => {
-                // Slab test in the box's own frame.
-                let (o, d) = (b.rot.inverse() * (from - b.pos), b.rot.inverse() * dir);
-                let (mut near, mut far, mut axis) = (f64::NEG_INFINITY, f64::INFINITY, 0);
-                for k in 0..3 {
-                    let (a, b2) = ((-h[k] - o[k]) / d[k], (h[k] - o[k]) / d[k]);
-                    let (lo, hi) = (a.min(b2), a.max(b2));
-                    if lo > near {
-                        (near, axis) = (lo, k);
-                    }
-                    far = far.min(hi);
-                }
-                (near >= 0.0 && near <= far).then(|| {
-                    let mut n = Vec3::ZERO;
-                    n[axis] = -d[axis].signum();
-                    (near, b.rot * n)
-                })
-            }
+            Shape::Sphere(r) => ray_sphere(from - b.pos, dir, r + radius),
+            Shape::Capsule(r, half) => ray_capsule(from, dir, segment(b), r + radius, half),
+            Shape::Box(h) => ray_rounded_box(b, h, from, dir, radius),
         };
         if let Some((t, normal)) = hit
             && t <= max
@@ -351,6 +350,54 @@ pub fn raycast(bodies: &[Body], from: Vec3, dir: Vec3, max: f64, skip: usize) ->
         }
     }
     best
+}
+
+/// Ray against box `b` (half extents `h`) grown by `radius`: its faces pushed out, and its
+/// edges and corners rounded.
+fn ray_rounded_box(b: &Body, h: Vec3, from: Vec3, dir: Vec3, radius: f64) -> Option<(f64, Vec3)> {
+    // Slab test against the box pushed out by the radius, in the box's own frame.
+    let (o, d) = (b.rot.inverse() * (from - b.pos), b.rot.inverse() * dir);
+    let grown = h + Vec3::splat(radius);
+    let (mut near, mut far, mut axis) = (f64::NEG_INFINITY, f64::INFINITY, 0);
+    for k in 0..3 {
+        let (a, b2) = ((-grown[k] - o[k]) / d[k], (grown[k] - o[k]) / d[k]);
+        let (lo, hi) = (a.min(b2), a.max(b2));
+        if lo > near {
+            (near, axis) = (lo, k);
+        }
+        far = far.min(hi);
+    }
+    if near < 0.0 || near > far {
+        return None;
+    }
+    // On a face (beyond the box on at most the axis it entered by): a flat hit.
+    let q = o + d * near;
+    if (0..3).all(|k| k == axis || q[k].abs() <= h[k] + 1e-9) {
+        let mut n = Vec3::ZERO;
+        n[axis] = -d[axis].signum();
+        return Some((near, b.rot * n));
+    }
+    // Otherwise it reached a rounded edge (or corner): the nearest of the twelve edge
+    // capsules, whose end spheres are the corners.
+    let corner = |k: usize| {
+        Vec3::new(
+            [-1.0, 1.0][k & 1],
+            [-1.0, 1.0][k >> 1 & 1],
+            [-1.0, 1.0][k >> 2],
+        ) * h
+    };
+    (0..8)
+        .flat_map(|k| {
+            (0..3)
+                .map(move |bit| (k, k ^ (1 << bit)))
+                .filter(|(a, c)| a < c)
+        })
+        .filter_map(|(a, c)| {
+            let (p, q) = (corner(a), corner(c));
+            ray_capsule(o, d, [p, q], radius, (q - p).length() / 2.0)
+        })
+        .min_by(|x, y| x.0.total_cmp(&y.0))
+        .map(|(t, n)| (t, b.rot * n))
 }
 
 /// Ray from `o` (relative to the sphere's centre) along unit `d` against a sphere of radius `r`.

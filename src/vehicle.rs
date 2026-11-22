@@ -1,6 +1,7 @@
 //! Cars, the way most game engines build them (a "raycast vehicle"): the body is an
-//! ordinary rigid body in the `World`, and each wheel is a ray down from the body
-//! carrying a spring-damper suspension and a tyre model. The wheels are not bodies:
+//! ordinary rigid body in the `World`, and each wheel is a tyre-sized sphere swept down from
+//! the body (a shape cast, so it rolls over edges rather than snapping onto them), carrying a
+//! spring-damper suspension and a tyre model. The wheels are not bodies:
 //! rolling contact is millimetres deep and changes every step, which rigid contact
 //! handles badly, so all the grip comes from the tyre model instead.
 //!
@@ -10,7 +11,7 @@
 //! why the brakes have ABS. Both directions together are capped by the friction
 //! circle, |F| ≤ μ·load.
 
-use crate::{Body, Quat, Vec3, raycast};
+use crate::{Body, Quat, Vec3, sphere_cast};
 
 const RADIUS: f64 = 0.33;
 /// Suspension length (mount to wheel centre) with no load, and how far it can compress.
@@ -40,10 +41,11 @@ const GEARS: [f64; 5] = [3.6, 2.2, 1.5, 1.15, 0.9];
 const REVERSE: f64 = 3.3;
 const FINAL_DRIVE: f64 = 3.9;
 const DRIVETRAIN: f64 = 0.9;
-/// Automatic shifting: up near the red line, down when the engine would lug; drive is cut
-/// for this long while a gear changes.
-const SHIFT_UP_RPM: f64 = 6200.0;
-const SHIFT_DOWN_RPM: f64 = 2500.0;
+/// Automatic shifting (rpm), from no throttle to full: up at 2000 rising to near the red
+/// line, down at 1100 rising to 2500 (each up-shift lands above the down-shift point, so it
+/// never hunts between gears). Drive is cut for SHIFT_TIME while a gear changes.
+const SHIFT_UP_RPM: (f64, f64) = (2000.0, 6200.0);
+const SHIFT_DOWN_RPM: (f64, f64) = (1100.0, 2500.0);
 const SHIFT_TIME: f64 = 0.25;
 /// Below this the clutch slips, so the engine never stalls (rpm).
 const IDLE_RPM: f64 = 1000.0;
@@ -68,9 +70,11 @@ const FRONT_WEIGHT: f64 = 0.61;
 /// How much the car understeers (s²/m²): it turns 1 / (1 + UNDERSTEER·v²) as tightly as its
 /// wheels point. Measured on this model and on the Civic in comma2k19 (tests/vehicle.rs).
 const UNDERSTEER: f64 = 6.0e-4;
-const ROLLING_RESISTANCE: f64 = 0.015;
-/// Air drag: ½·ρ·Cd·A for a small car.
-const DRAG: f64 = 0.5 * 1.2 * 0.65;
+/// Rolling resistance (force per unit load) and air drag (½·ρ·Cd·A), from the EPA's
+/// coast-down road load for the 2016 Civic 1.5 L CVT (tests/vehicle.rs); the rolling figure
+/// includes the drivetrain's friction, as a coast-down in neutral does.
+const ROLLING_RESISTANCE: f64 = 0.0094;
+const DRAG: f64 = 0.5 * 1.2 * 0.675;
 /// Below this speed (m/s) slip is measured against it instead, so slip stays finite at standstill.
 const SLOW: f64 = 1.0;
 pub const WHEELBASE: f64 = 2.7;
@@ -129,7 +133,7 @@ pub struct Car {
 }
 
 impl Car {
-    /// A 1200 kg, rear-wheel-drive car on `body`, whose box should be about 4.2 x 0.7 x 1.4 m,
+    /// A 1200 kg, front-wheel-drive car on `body`, whose box should be about 4.2 x 0.7 x 1.4 m,
     /// with 61% of its weight on the front wheels.
     pub fn new(body: usize) -> Car {
         let wheel = |x: f64, z: f64| Wheel {
@@ -184,17 +188,17 @@ impl Car {
         let b = &bodies[me];
         let mut impulses = vec![(me, b.pos, b.vel * (-DRAG * b.vel.length() * h))];
         let down = b.rot * Vec3::NEG_Y;
-        // Each wheel's ray finds the nearest surface below it on any body: ground, kerb,
+        // Each wheel's sweep finds the nearest surface below it on any body: ground, kerb,
         // ramp or crate. First every suspension length, as the anti-roll bars need both
         // wheels of an axle; then the forces.
         let hits: Vec<_> = self
             .wheels
             .iter()
-            .map(|w| raycast(bodies, b.pos + b.rot * w.mount, down, REST + RADIUS, me))
+            .map(|w| sphere_cast(bodies, b.pos + b.rot * w.mount, down, RADIUS, REST, me))
             .collect();
         let lengths: Vec<f64> = hits
             .iter()
-            .map(|hit| hit.map_or(REST, |hit| (hit.distance - RADIUS).min(REST)))
+            .map(|hit| hit.map_or(REST, |hit| hit.distance.min(REST)))
             .collect();
         let drive = self.drive_torque(h);
         for (k, w) in self.wheels.iter_mut().enumerate() {
@@ -210,7 +214,7 @@ impl Car {
             let rate = (w.length - length) / h; // compression speed
             w.length = length;
             let partner = REST - lengths[k ^ 1]; // the other wheel on the same axle
-            let drive = if w.front { 0.0 } else { drive / 2.0 }; // open differential
+            let drive = if w.front { drive / 2.0 } else { 0.0 }; // open differential
             let mut spin = w.spin;
             let mut slip = (0.0, 0.0);
             let compression = REST - length;
@@ -232,8 +236,9 @@ impl Car {
             };
             if let (Some(hit), true) = (hits[k], w.load > 0.0) {
                 let p = b.pos + b.rot * w.mount;
-                let contact = p + down * hit.distance;
+                // Where the tyre touches: from the wheel centre against the surface normal.
                 let n = hit.normal;
+                let contact = p + down * hit.distance - n * RADIUS;
                 // Relative to the surface, which may itself be moving (a crate).
                 let under = &bodies[hit.body];
                 let v = b.point_vel(contact - b.pos) - under.point_vel(contact - under.pos);
@@ -306,13 +311,23 @@ impl Car {
                     GEARS[gear as usize - 1]
                 }
         };
-        let wheel = (self.wheels[2].spin + self.wheels[3].spin).abs() / 2.0;
+        let wheel = (self.wheels[0].spin + self.wheels[1].spin).abs() / 2.0; // the driven pair
         let to_rpm = 60.0 / std::f64::consts::TAU;
         self.rpm = (wheel * ratio(self.gear) * to_rpm).max(IDLE_RPM);
         self.shifting = (self.shifting - h).max(0.0);
         if self.gear > 0 && self.shifting == 0.0 {
-            let up = self.rpm > SHIFT_UP_RPM && (self.gear as usize) < GEARS.len();
-            let down = self.rpm < SHIFT_DOWN_RPM && self.gear > 1;
+            // Shift points follow the throttle, as in any automatic: gently it changes up at
+            // low revs, flat out it holds each gear to near the limiter; off the throttle it
+            // changes down only as the revs near idle.
+            let t = self.throttle.clamp(0.0, 1.0);
+            let up_at = SHIFT_UP_RPM.0 + (SHIFT_UP_RPM.1 - SHIFT_UP_RPM.0) * t;
+            let down_at = SHIFT_DOWN_RPM.0 + (SHIFT_DOWN_RPM.1 - SHIFT_DOWN_RPM.0) * t;
+            // Judged by road speed (the undriven rear wheels), not the driven pair, so wheelspin
+            // at a launch is not taken for revs.
+            let road = (self.wheels[2].spin + self.wheels[3].spin).abs() / 2.0;
+            let revs = road * ratio(self.gear) * to_rpm;
+            let up = revs > up_at && (self.gear as usize) < GEARS.len();
+            let down = revs < down_at && self.gear > 1;
             if up || down {
                 self.gear += if up { 1 } else { -1 };
                 self.shifting = SHIFT_TIME;
