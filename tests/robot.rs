@@ -51,6 +51,7 @@ fn bar_pendulum_has_the_textbook_period() {
 }
 
 #[test]
+#[allow(clippy::needless_range_loop)] // reads as the matrix it checks
 fn mass_matrix_is_symmetric() {
     let r = robot::arm();
     let m = r.mass_matrix(&[0.3, -0.8, 1.1, 0.4]);

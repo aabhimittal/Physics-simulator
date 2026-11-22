@@ -234,6 +234,7 @@ impl World {
 
     /// Moves the anchors so the error `c`, measured along `n` from b's anchor to a's, goes to 0.
     /// Returns the impulse magnitude.
+    #[allow(clippy::too_many_arguments)] // the XPBD constraint's own inputs
     fn solve_pos(
         &mut self,
         a: usize,

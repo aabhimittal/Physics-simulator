@@ -256,9 +256,42 @@ pub fn crossing_brakes_failed() -> (World, Robot) {
     (w, walker)
 }
 
+/// How fast the person at the crossing chooses to walk, as people judge the traffic: at the
+/// kerb they step off only if the car is more than 3.5 s away or visibly braking, and wait
+/// otherwise; on the road, a car under 2.5 s away and not braking makes them hurry. The pace
+/// changes at 0.8 m/s², as the walking policy was trained to follow.
+fn pace_for_crossing(w: &World, walker: &Robot, dt: f64) -> f64 {
+    let car = &w.cars[0];
+    let b = &w.bodies[car.body];
+    let speed = b.vel.length();
+    // Distance round the road to the crossing (at angle 0), driving clockwise from above.
+    let gap = b.pos.z.atan2(b.pos.x).rem_euclid(std::f64::consts::TAU) * 30.0;
+    let arriving = if speed > 1.0 {
+        gap / speed
+    } else {
+        f64::INFINITY
+    };
+    let braking = speed < 1.0 || car.accel.dot(b.vel) / speed.max(1e-9) < -1.0;
+    let x = walker.q[0];
+    // Slowing from walking pace takes about a metre, so they decide by the time they reach
+    // KERB, 2 m short of the road, and come to a stop at its edge.
+    let wanted = if x < KERB && arriving < 3.5 && !braking {
+        0.0 // wait at the kerb
+    } else if (KERB + 1.5..KERB + 9.5).contains(&x) && arriving < 2.5 && !braking {
+        BRISK_SPEED // hurry across
+    } else {
+        robot::WALKING_SPEED
+    };
+    let change = (wanted - walker.command).clamp(-0.8 * dt, 0.8 * dt);
+    walker.command + change
+}
+
+/// A hurried walk (m/s), near the captured brisk walk's 1.9 m/s.
+const BRISK_SPEED: f64 = 1.9;
+
 fn walker_at_kerb() -> Robot {
     let mut r = robot::walker();
-    r.q[0] = KERB;
+    r.q[0] = KERB - 2.0;
     r
 }
 
@@ -268,6 +301,7 @@ pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
     // The walker's slides: x along its path, z sideways.
     let at = |v: &[f64]| Vec3::new(v[0], 0.0, v[2]);
     w.cars[0].pedestrian = Some((at(&walker.q), at(&walker.qd)));
+    walker.command = pace_for_crossing(w, walker, dt);
     // The two simulators advance together in short steps, with contact forces between them
     // worked out afresh each time, so the person and the car can collide.
     let steps = 16;

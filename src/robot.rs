@@ -125,6 +125,8 @@ pub struct Robot {
     /// Corrections a learned policy adds to the controller's joint targets (rad), in the
     /// controller's own order. Empty when no policy is attached.
     pub adjust: Vec<f64>,
+    /// What a person or game asks of the controller: for the walker, its walking speed (m/s).
+    pub command: f64,
 }
 
 impl Robot {
@@ -144,6 +146,7 @@ impl Robot {
             ground: false,
             external: Vec::new(),
             adjust: Vec::new(),
+            command: 0.0,
         }
     }
 
@@ -381,6 +384,7 @@ impl Robot {
     /// A stiff joint damper (a limit, or a motor past its free speed) on a light link, such
     /// as a foot, otherwise overshoots every step, and the error shows up as momentum from
     /// nowhere: a fallen walker sliding faster and faster along the floor.
+    #[allow(clippy::needless_range_loop)] // Gaussian elimination reads clearest by index
     fn accelerations_over(&self, q: &[f64], qd: &[f64], h: f64) -> Vec<f64> {
         let n = q.len();
         let (tau, stiff, pushes, contacts) = self.applied(q, qd);
@@ -725,7 +729,7 @@ const HOPPER_LEG: f64 = 1.0;
 /// - on the ground, the hip levels the body (posture).
 fn hop(r: &mut Robot) {
     // Walk back and forth between two marks, 10 s each way.
-    let goal = if (r.time / 10.0) as u64 % 2 == 0 {
+    let goal = if ((r.time / 10.0) as u64).is_multiple_of(2) {
         2.0
     } else {
         -2.0
@@ -861,6 +865,7 @@ pub fn walker() -> Robot {
     let mut r = Robot::new(links);
     r.ground = true;
     r.controller = Some(mimic_walk);
+    r.command = WALKING_SPEED;
     start_in_stride(&mut r, 0.0);
     r
 }
@@ -890,6 +895,8 @@ pub const WALKER_PARTS: [Part; 14] = {
 /// The walker's joints: x, y and z slides (massless) carrying the torso, whose hinge is its
 /// pitch; then hip, knee and ankle for each leg, and shoulder and elbow for each arm.
 pub const WALKER_TORSO: usize = 3;
+/// The walker's usual pace (m/s): the captured normal walk's.
+pub const WALKING_SPEED: f64 = 1.36;
 pub const WALKER_HIPS: [usize; 2] = [4, 7];
 const SHOULDERS: [usize; 2] = [10, 12];
 
@@ -941,21 +948,50 @@ const TOUCH_DAMPING: f64 = 300.0;
 const TOUCH_GRIP: f64 = 2000.0;
 const TOUCH_FRICTION: f64 = 0.5;
 
-/// Motion-capture reference at phase `phase` (0 at the stance heel strike, 1 at the swing
-/// foot's), interpolated between samples.
-fn reference(phase: f64) -> [f64; 11] {
-    use crate::mocap_walk::STEP;
-    let x = phase.clamp(0.0, 1.0) * (STEP.len() - 1) as f64;
-    let (i, t) = (x as usize, x.fract());
-    let j = (i + 1).min(STEP.len() - 1);
-    std::array::from_fn(|k| STEP[i][k] + (STEP[j][k] - STEP[i][k]) * t)
+/// The walker standing still: everything straight, elbows a little bent.
+const STANDING: [f64; 11] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.2];
+
+/// Motion-capture reference at phase `phase` of a step (0 at the stance heel strike, 1 at
+/// the swing foot's) when walking at `speed`, and how long a step lasts at that speed. Between
+/// two captured speeds the walks are blended; below the slowest, the slow walk is blended
+/// toward standing still, so speed 0 stands and anything above it steps off.
+fn reference(phase: f64, speed: f64) -> ([f64; 11], f64) {
+    use crate::mocap_walk::{CLIPS, Clip};
+    let at = |c: &Clip| -> [f64; 11] {
+        let x = phase.clamp(0.0, 1.0) * (c.step.len() - 1) as f64;
+        let (i, t) = (x as usize, x.fract());
+        let j = (i + 1).min(c.step.len() - 1);
+        std::array::from_fn(|k| c.step[i][k] + (c.step[j][k] - c.step[i][k]) * t)
+    };
+    let mix =
+        |a: [f64; 11], b: [f64; 11], t: f64| std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t);
+    let slowest = &CLIPS[0];
+    if speed <= slowest.speed {
+        let t = (speed / slowest.speed).max(0.0);
+        return (mix(STANDING, at(slowest), t), slowest.step_seconds);
+    }
+    let i = CLIPS
+        .iter()
+        .rposition(|c| c.speed <= speed)
+        .unwrap()
+        .min(CLIPS.len() - 2);
+    let (a, b) = (&CLIPS[i], &CLIPS[i + 1]);
+    let t = ((speed - a.speed) / (b.speed - a.speed)).min(1.0);
+    (
+        mix(at(a), at(b), t),
+        a.step_seconds + (b.step_seconds - a.step_seconds) * t,
+    )
+}
+
+/// How far through its step the walker is, at its commanded speed's step length in time.
+fn phase(r: &Robot) -> f64 {
+    (r.time - r.memory[1]) / reference(0.0, r.command).1
 }
 
 /// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk.
 pub fn imitate(r: &mut Robot) {
-    use crate::mocap_walk::{SPEED, STEP_SECONDS};
     let m = MIMIC;
-    let [stance_side, step_start, steps, mut landing_start] = r.memory;
+    let [stance_side, _, steps, mut landing_start] = r.memory;
     let side = stance_side as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
     let frames = r.frames(&r.q);
@@ -969,7 +1005,12 @@ pub fn imitate(r: &mut Robot) {
             })
             .fold(f64::INFINITY, |low, p| low.min(p.y))
     };
-    let phase = (r.time - step_start) / (STEP_SECONDS);
+    // Standing still, no step ends; when asked to walk again, start a fresh one.
+    if phase(r) > 1.5 {
+        r.memory[1] = r.time;
+        return imitate(r);
+    }
+    let phase = phase(r);
     // The trailing foot is still down early in a step (double support): only once it has
     // lifted, late in the step, can its landing end the step.
     if landing_start.is_infinite()
@@ -983,7 +1024,7 @@ pub fn imitate(r: &mut Robot) {
         r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY];
         return imitate(r);
     }
-    let mut refs = reference(phase + m.lead);
+    let mut refs = reference(phase + m.lead, r.command).0;
     // The policy's corrections, if any: torso, swing hip, knee, ankle, stance knee, ankle.
     for (k, a) in [0, 4, 5, 6, 2, 3].into_iter().zip(&r.adjust) {
         refs[k] += a;
@@ -1016,7 +1057,8 @@ pub fn imitate(r: &mut Robot) {
     let ankle = frames[stance + 2].0;
     let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
-    let aim = swing_hip + m.distance_gain * (com.x - ankle.x) + m.speed_gain * (com_vel.x - SPEED);
+    let aim =
+        swing_hip + m.distance_gain * (com.x - ankle.x) + m.speed_gain * (com_vel.x - r.command);
     let swing_torque = pd(
         pitch + r.q[swing],
         pitch_rate + r.qd[swing],
@@ -1056,8 +1098,8 @@ pub fn imitate(r: &mut Robot) {
         torque[joint] = pd(r.q[joint], r.qd[joint], shoulder, 60.0);
         torque[joint + 1] = pd(r.q[joint + 1], r.qd[joint + 1], elbow, 30.0);
     }
-    for i in WALKER_TORSO + 1..r.q.len() {
-        r.ctrl[i] = torque[i] / r.links[i].gear;
+    for (i, t) in torque.iter().enumerate().skip(WALKER_TORSO + 1) {
+        r.ctrl[i] = t / r.links[i].gear;
     }
     r.target = Some(Vec3::new(com.x, 0.02, com.z));
 }
@@ -1095,7 +1137,7 @@ pub const MIMIC: Mimic = Mimic {
 /// Puts the walker in the capture's pose `phase` of the way through a step, moving at its
 /// speed, the lower foot on the floor.
 pub fn start_in_stride(r: &mut Robot, phase: f64) {
-    use crate::mocap_walk::STEP_SECONDS;
+    let (speed, seconds) = (r.command, reference(0.0, r.command).1);
     let at = |phase| {
         let [
             lean,
@@ -1106,7 +1148,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
             swing_knee,
             swing_ankle,
             ..,
-        ] = reference(phase);
+        ] = reference(phase, speed).0;
         [
             lean,
             stance_hip - lean,
@@ -1119,7 +1161,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
     };
     // Joint rates from the capture too, so the joints are already moving as they should.
     let (now, soon) = (at(phase), at(phase + 0.02));
-    let rate = |k: usize| (soon[k] - now[k]) / (0.02 * STEP_SECONDS);
+    let rate = |k: usize| (soon[k] - now[k]) / (0.02 * seconds);
     let (stance, swing) = (WALKER_HIPS[0], WALKER_HIPS[1]);
     for (k, joint) in [
         WALKER_TORSO,
@@ -1135,7 +1177,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
     {
         (r.q[joint], r.qd[joint]) = (now[k], rate(k));
     }
-    r.memory = [0.0, r.time - phase * STEP_SECONDS, 0.0, f64::INFINITY];
+    r.memory = [0.0, r.time - phase * seconds, 0.0, f64::INFINITY];
     r.q[1] = 0.0;
     let frames = r.frames(&r.q);
     let low = [stance + 2, swing + 2]
@@ -1151,17 +1193,16 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
         })
         .fold(f64::INFINITY, f64::min);
     r.q[1] = -low + 0.002;
-    r.qd[0] = crate::mocap_walk::SPEED;
+    r.qd[0] = speed;
 }
 
 /// Squared difference (rad²) between the walker's pose and the capture's at the current
 /// phase of its step, averaged over the leg joints and the torso.
 pub fn imitation_error(r: &Robot) -> f64 {
-    use crate::mocap_walk::STEP_SECONDS;
     let m = MIMIC;
     let side = r.memory[0] as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
-    let refs = reference((r.time - r.memory[1]) / (STEP_SECONDS));
+    let refs = reference(phase(r), r.command).0;
     let pitch = r.q[WALKER_TORSO];
     let have = [
         pitch - m.lean,
@@ -1181,13 +1222,12 @@ pub fn imitation_error(r: &Robot) -> f64 {
 
 /// What the imitation policy sees, the same whichever leg is on the ground: phase of the
 /// step (as sine and cosine, and its raw value), height, vertical and forward speed, torso
-/// pitch and rate, then the stance leg's hip, knee and ankle and the swing leg's, angles and
+/// pitch and rate, the speed it is asked to walk at, then the stance leg's hip, knee and ankle and the swing leg's, angles and
 /// then rates. Rates scaled by 0.1 to keep every input near ±1.
 pub fn imitation_obs(r: &Robot) -> Vec<f64> {
-    use crate::mocap_walk::STEP_SECONDS;
     let side = r.memory[0] as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
-    let phase = ((r.time - r.memory[1]) / (STEP_SECONDS)).min(1.5);
+    let phase = phase(r).min(1.5);
     let joints = [stance, stance + 1, stance + 2, swing, swing + 1, swing + 2];
     let tau = std::f64::consts::TAU;
     [
@@ -1199,6 +1239,7 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
         r.qd[0],
         r.q[WALKER_TORSO],
         0.1 * r.qd[WALKER_TORSO],
+        r.command,
     ]
     .into_iter()
     .chain(joints.iter().map(|&j| r.q[j]))

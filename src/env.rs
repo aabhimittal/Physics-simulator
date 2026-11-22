@@ -21,7 +21,7 @@ pub enum Task {
     /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
     /// controller's joint targets. Observation and action are in stance/swing order (see
     /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
-    /// its speed.
+    /// the speed asked for, which changes now and then, from standing still to 2 m/s.
     Imitate,
 }
 
@@ -65,6 +65,8 @@ pub struct Env {
     /// Random shoves while imitating: the generator, and the shove's steps left.
     rng: Rng,
     shove_left: u32,
+    /// The walking speed the imitating walker is asked to change to (m/s).
+    pace: f64,
 }
 
 impl Env {
@@ -80,6 +82,7 @@ impl Env {
             steps: 0,
             rng: Rng::new(0),
             shove_left: 0,
+            pace: 0.0,
         };
         env.reset(0);
         env
@@ -116,6 +119,9 @@ impl Env {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
                 r.adjust = vec![0.0; IMITATE_ACTIONS];
+                // At any pace from standing still to a brisk 2 m/s.
+                r.command = 1.0 + rng.uniform();
+                self.pace = r.command;
                 robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
             }
             Task::Reach => {
@@ -175,6 +181,14 @@ impl Env {
         let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
         if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
+            // About every three seconds, asked for a new pace (from standing to 2 m/s), which
+            // the request ramps to at 0.8 m/s², about as quickly as people change pace: so it
+            // learns to start, stop, speed up and slow down.
+            if self.rng.uniform() > 1.0 - 1.0 / 90.0 {
+                self.pace = 1.0 + self.rng.uniform();
+            }
+            let change = self.pace - self.robot.command;
+            self.robot.command += change.clamp(-0.8 * Self::DT, 0.8 * Self::DT);
             // About every two seconds, a shove of up to 300 N either way on the chest for a
             // fifth of a second, so the policy learns to recover as well as to walk.
             if self.shove_left == 0 && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
@@ -217,7 +231,7 @@ impl Env {
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
                 let pose = (-10.0 * robot::imitation_error(r)).exp();
-                let speed = (-4.0 * (r.qd[0] - crate::mocap_walk::SPEED).powi(2)).exp();
+                let speed = (-4.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
                     0.7 * pose + 0.3 * speed,
                     r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,

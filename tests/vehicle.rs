@@ -292,6 +292,29 @@ fn wheels_roll_over_a_kerb_instead_of_snapping_onto_it() {
 }
 
 #[test]
+fn a_box_beside_the_tyres_does_not_lift_them() {
+    // A 10 cm block along the car's left side, its edge 0.2 m outside the left tyres'
+    // centre line: beyond the tyre's tread, so the wheels stay on the road. (A swept sphere
+    // as wide as the tyre is tall would touch the block's edge and climb onto it.)
+    let mut w = car_at(0.0);
+    w.add(Body::new(
+        Shape::Box(Vec3::new(3.0, 0.05, 0.5)),
+        0.0,
+        Vec3::new(0.0, 0.05, 30.8 + 0.2 + 0.5),
+    ));
+    for _ in 0..(2.0 / DT) as usize {
+        w.step(DT);
+        assert!(
+            w.cars[0].wheels.iter().all(|wheel| wheel.ground == Some(0)),
+            "a wheel touches the block beside it at t = {:.2}",
+            w.cars[0].time
+        );
+    }
+    let shoved = (w.bodies[1].pos.z - 30.0).abs();
+    assert!(shoved < 0.01, "pushed {shoved:.3} m sideways by the block");
+}
+
+#[test]
 fn car_drives_up_a_ramp_jumps_off_and_lands_upright() {
     // A 4 m ramp rising to 0.6 m (8.6°) across the car's path.
     let mut w = car_at(8.0);
