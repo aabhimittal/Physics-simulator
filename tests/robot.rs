@@ -236,11 +236,13 @@ fn walker_walks_at_human_speed_and_cadence() {
         );
     }
     // People walk at about 1.2 to 1.4 m/s, 1.8 to 2 steps per second, 0.6 to 0.75 m a step.
+    // The captured person (CMU subject 07) stepped quicker and shorter than most, 2.26 steps a
+    // second at 1.36 m/s, so the walker copying them may too.
     let (speed, cadence) = (r.q[0] / r.time, r.memory[2] / r.time);
     let stride = r.q[0] / r.memory[2];
     println!("{speed:.2} m/s, {cadence:.2} steps/s, {stride:.2} m a step");
     assert!((1.0..1.5).contains(&speed), "{speed:.2} m/s");
-    assert!((1.6..2.2).contains(&cadence), "{cadence:.2} steps/s");
+    assert!((1.6..2.4).contains(&cadence), "{cadence:.2} steps/s");
     assert!((0.5..0.8).contains(&stride), "{stride:.2} m a step");
 }
 

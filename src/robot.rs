@@ -1248,13 +1248,21 @@ pub fn mimic_walk(r: &mut Robot) {
         r.ctrl.iter_mut().for_each(|c| *c = 0.0);
         return;
     }
-    // Asked to stop: once slowed to a walk's slowest and both feet are down, stand. Asked to
-    // go: step off again, the policy taking over from standing (which it was trained on).
+    // Asked to stop: stand at a footfall that can stop it, one where the front toe is past the
+    // capture point (centre of mass + speed·√(leg / g)), the spot it must step to in order to
+    // come to rest; until then, keep taking slow steps. Asked to go: step off again, the
+    // policy taking over from standing (which it was trained on).
     let frames = r.frames(&r.q);
     let both_down = WALKER_HIPS
         .iter()
         .all(|&hip| sole_height(r, &frames, hip + 2) < 0.01);
-    if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && r.qd[0].abs() < 0.8 {
+    let (com, com_vel) = centre_of_mass(r, &frames);
+    let toe = WALKER_HIPS
+        .iter()
+        .map(|&hip| frames[hip + 2].0.x + 0.16)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let capture = com.x + com_vel.x * (0.9f64 / 9.81).sqrt();
+    if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && toe > capture {
         r.memory[4] = 1.0;
     } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
         // Step off with the rear foot: the front one is the stance foot, which puts the
