@@ -36,7 +36,7 @@ cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm
 after changing anything under `src/`.
 
 `.github/workflows/ci.yml` runs on every pull request and push to `main`: `cargo fmt
---check`, the Rust and Python tests, the WebAssembly build, and, on pull requests, a
+--check`, `cargo clippy` with warnings as errors, the Rust and Python tests, the WebAssembly build, and, on pull requests, a
 check that a change to simulation code also updates `web/sim.wasm`. The live site
 (`.github/workflows/pages.yml`) builds `sim.wasm` from source, so it always matches `main`.
 
@@ -68,6 +68,11 @@ conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
   The springs are stiff, so each RK4 stage folds them into the mass matrix through each
   contact point's Jacobian (`Jᵀ(h·C + h²·K)J`): contact stays stable even at one step per
   frame, where the explicit version blew up.
+- **Static friction**: a corner that touches the floor is anchored there and pulled back by
+  a stiff spring; only when that pull passes μ times the load does the anchor slide along
+  (Coulomb friction). Friction as a damper alone, as it was, lets any steady sideways force
+  creep a foot along: a person standing still slid 8 cm a second, and one stopped mid-stride
+  did the splits.
 - **Contact with world bodies** (`Robot::touch`): link corners inside a body, and box
   corners inside a link, are pushed apart by the same kind of spring, and the body gets the
   opposite impulse, so momentum passes both ways.
@@ -296,9 +301,9 @@ cannot stop it: it strikes them at about 46 km/h and slows as it passes them mom
 timing is staged (starts from 105° to 140° back all lead to an impact); what follows is
 not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
-Limits: the swept sphere is as wide as the tyre is tall, so it can touch a box up to 0.33 m
-to the side of the wheel, where a real 0.2 m tyre would miss it (a cylinder cast is the
-upgrade); the gearbox is automatic only.
+Limits: the tyre is a swept sphere, and a touch further to the side than its 11 cm half
+tread counts as beside the tyre, not under it, so the wheel looks straight down instead (a
+cylinder cast would do this exactly); the gearbox is automatic only.
 
 ## Implicit joint damping
 
