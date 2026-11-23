@@ -1044,8 +1044,13 @@ fn pace(r: &Robot) -> f64 {
 pub const SLOWEST_WALK: f64 = 0.6;
 const STOP_BELOW: f64 = 0.3;
 
-/// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk.
+/// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk;
+/// or, when asked for no speed, standing still (`stand`).
 pub fn imitate(r: &mut Robot) {
+    stop_or_go(r);
+    if r.memory[4] == 1.0 {
+        return stand(r);
+    }
     let m = MIMIC;
     let [stance_side, _, steps, mut landing_start, ..] = r.memory;
     let side = stance_side as usize;
@@ -1292,10 +1297,20 @@ pub fn mimic_walk(r: &mut Robot) {
         r.ctrl.iter_mut().for_each(|c| *c = 0.0);
         return;
     }
-    // Asked to stop: stand at a footfall that can stop it, one where the front toe is past the
-    // capture point (centre of mass + speed·√(leg / g)), the spot it must step to in order to
-    // come to rest; until then, keep taking slow steps. Asked to go: step off again, the
-    // policy taking over from standing (which it was trained on).
+    if r.memory[4] == 0.0 {
+        r.adjust = walk_policy(&imitation_obs(r))
+            .iter()
+            .map(|a| IMITATE_REACH * a.clamp(-1.0, 1.0))
+            .collect();
+    }
+    imitate(r);
+}
+
+/// Switches the walker between walking and standing still as its command asks.
+/// Asked to stop: stand at a footfall that can stop it, one where the front toe is past the
+/// capture point (centre of mass + speed·√(leg / g)), the spot it must step to in order to
+/// come to rest; until then, keep taking slow steps. Asked to go: step off again.
+fn stop_or_go(r: &mut Robot) {
     let frames = r.frames(&r.q);
     let both_down = WALKER_HIPS
         .iter()
@@ -1307,22 +1322,20 @@ pub fn mimic_walk(r: &mut Robot) {
         .fold(f64::NEG_INFINITY, f64::max);
     let capture = com.x + com_vel.x * (0.9f64 / 9.81).sqrt();
     if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && toe > capture {
+        // Stand as this footfall left the legs, but each knee straightened and each foot
+        // put down flat, as people settle out of a stride.
         r.memory[4] = 1.0;
-        r.held = r.q.clone(); // stand as this footfall left it
+        r.held = r.q.clone();
+        for hip in WALKER_HIPS {
+            r.held[hip + 1] = -0.05;
+            r.held[hip + 2] = -(r.q[WALKER_TORSO] + r.held[hip] + r.held[hip + 1]);
+        }
     } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
         // Step off with the rear foot: the front one is the stance foot, which puts the
         // walker in the capture's pose at a heel strike, the start of a step.
         let front = (frames[WALKER_HIPS[1] + 2].0.x > frames[WALKER_HIPS[0] + 2].0.x) as usize;
         r.memory = [front as f64, r.time, r.memory[2], f64::INFINITY, 0.0];
     }
-    if r.memory[4] == 1.0 {
-        return stand(r);
-    }
-    r.adjust = walk_policy(&imitation_obs(r))
-        .iter()
-        .map(|a| IMITATE_REACH * a.clamp(-1.0, 1.0))
-        .collect();
-    imitate(r);
 }
 
 /// Height of the lowest corner of `foot`'s box.

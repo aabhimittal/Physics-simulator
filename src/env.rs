@@ -201,17 +201,23 @@ impl Env {
         if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
             // About every three seconds, asked for a new pace, which the request ramps to at
-            // 0.8 m/s², about as quickly as people change pace: so it learns to speed up and
-            // slow down. (Stopping is a separate standing controller, `robot::mimic_walk`.)
+            // 0.8 m/s², about as quickly as people change pace: so it learns to speed up, slow
+            // down, and (a quarter of the time) stop, arriving at a footfall the standing
+            // controller can hold (`robot::imitate` hands over to it).
             if self.rng.uniform() > 1.0 - 1.0 / 90.0 {
-                let u = 0.5 + 0.5 * self.rng.uniform();
-                self.pace = WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * u;
+                let u = self.rng.uniform();
+                self.pace = if u < -0.5 {
+                    0.0
+                } else {
+                    WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * u)
+                };
             }
             let change = self.pace - self.robot.command;
             self.robot.command += change.clamp(-0.8 * Self::DT, 0.8 * Self::DT);
             // About every two seconds, a shove of up to 300 N either way on the chest for a
             // fifth of a second, so the policy learns to recover as well as to walk.
-            if self.shove_left == 0 && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
+            let standing = self.robot.memory[4] == 1.0;
+            if self.shove_left == 0 && !standing && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
                 let torso = self.robot.frames(&self.robot.q)[robot::WALKER_TORSO];
                 let force = Vec3::X * 300.0 * self.rng.uniform();
                 self.robot.external = vec![robot::Push {
@@ -250,7 +256,12 @@ impl Env {
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
-                let pose = (-10.0 * robot::imitation_error(r)).exp();
+                // Standing still holds its pose by itself: only stillness counts then.
+                let pose = if r.memory[4] == 1.0 {
+                    1.0
+                } else {
+                    (-10.0 * robot::imitation_error(r)).exp()
+                };
                 let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
                     0.5 * pose + 0.5 * speed,
