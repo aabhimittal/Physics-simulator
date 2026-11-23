@@ -536,7 +536,7 @@ fn walker_stops_and_sets_off_again() {
     // Walking, then asked to stop (the request easing off at 0.8 m/s², as the crossing does),
     // then to walk on: it slows, stands on both feet, and steps off again without falling.
     let mut r = robot::walker();
-    let (mut stood, mut walked_again) = (false, false);
+    let (mut stood, mut walked_again, mut x) = (false, false, 0.0);
     for frame in 0..(16.0 / DT) as usize {
         let wanted = if (180..480).contains(&frame) {
             0.0
@@ -546,7 +546,11 @@ fn walker_stops_and_sets_off_again() {
         r.command += (wanted - r.command).clamp(-0.8 * DT, 0.8 * DT);
         r.step(DT, 16);
         assert!(r.q[1] > 0.7, "fell at t = {:.1}", r.time);
-        stood |= frame == 470 && r.memory[4] == 1.0 && r.qd[0].abs() < 0.1;
+        // Standing: in its standing mode, and moved under 2 cm in the last half second.
+        if frame == 440 {
+            x = r.q[0];
+        }
+        stood |= frame == 470 && r.memory[4] == 1.0 && (r.q[0] - x).abs() < 0.02;
         walked_again |= frame > 800 && r.qd[0] > 1.0;
     }
     assert!(stood, "had not come to a stand by t = 7.8 s");

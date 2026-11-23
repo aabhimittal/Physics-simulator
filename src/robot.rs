@@ -81,7 +81,10 @@ const LIMIT_STIFFNESS: f64 = 2.0e4;
 const LIMIT_DAMPING: f64 = 200.0;
 const GROUND_STIFFNESS: f64 = 3.0e4;
 const GROUND_DAMPING: f64 = 300.0;
-const GROUND_GRIP: f64 = 20000.0; // stiff enough that a foot standing still does not creep
+const GROUND_GRIP: f64 = 2000.0;
+/// Static friction's spring (N/m per corner): how hard a corner is pulled back to where it
+/// landed until friction gives way.
+const GROUND_HOLD: f64 = 3.0e4;
 const GROUND_FRICTION: f64 = 1.0;
 
 /// A force applied at world point `at` on link `link`.
@@ -128,6 +131,12 @@ pub struct Robot {
     pub adjust: Vec<f64>,
     /// What a person or game asks of the controller: for the walker, its walking speed (m/s).
     pub command: f64,
+    /// Static friction with the floor: for each link corner touching it (8 per link), the
+    /// point where it is held, which it is pulled back to by a stiff spring until that pull
+    /// exceeds the friction limit, when the anchor slides along (Coulomb friction).
+    anchors: Vec<Option<Vec3>>,
+    /// The joint angles the walker holds while standing still (empty while walking).
+    held: Vec<f64>,
 }
 
 impl Robot {
@@ -148,6 +157,8 @@ impl Robot {
             external: Vec::new(),
             adjust: Vec::new(),
             command: 0.0,
+            anchors: vec![None; 8 * n],
+            held: Vec::new(),
         }
     }
 
@@ -342,15 +353,17 @@ impl Robot {
                     let v = vel[link].1 + vel[link].0.cross(r);
                     let normal = (-GROUND_STIFFNESS * at.y - GROUND_DAMPING * v.y).max(0.0);
                     let slide = Vec3::new(v.x, 0.0, v.z);
-                    let grip = (slide * -GROUND_GRIP).clamp_length_max(GROUND_FRICTION * normal);
+                    let anchor = self.anchors[8 * link + k].unwrap_or(at);
+                    let pulled = Vec3::new(anchor.x - at.x, 0.0, anchor.z - at.z);
+                    let wanted = pulled * GROUND_HOLD - slide * GROUND_GRIP;
+                    let limit = GROUND_FRICTION * normal;
                     pushes.push(Push {
                         link,
                         at,
-                        force: Vec3::Y * normal + grip,
+                        force: Vec3::Y * normal + wanted.clamp_length_max(limit),
                     });
                     if normal > 0.0 {
-                        let holding = GROUND_GRIP * slide.length() < GROUND_FRICTION * normal;
-                        contacts.push((link, at, holding));
+                        contacts.push((link, at, wanted.length() < limit));
                     }
                 }
             }
@@ -402,7 +415,11 @@ impl Robot {
             for (link, at, holding) in contacts {
                 let j = self.point_jacobian(&frames, link, at);
                 let normal = h * GROUND_DAMPING + h * h * GROUND_STIFFNESS;
-                let grip = if holding { h * GROUND_GRIP } else { 0.0 };
+                let grip = if holding {
+                    h * GROUND_GRIP + h * h * GROUND_HOLD
+                } else {
+                    0.0
+                };
                 for a in 0..n {
                     for b in 0..n {
                         m[a][b] +=
@@ -454,6 +471,33 @@ impl Robot {
                 self.qd[i] += h / 6.0 * (a1[i] + 2.0 * a2[i] + 2.0 * a3[i] + a4[i]);
             }
             self.time += h;
+            if self.ground {
+                self.move_anchors();
+            }
+        }
+    }
+
+    /// Static friction's bookkeeping after a step: a corner that has just touched the floor is
+    /// held where it is; one pulled harder than friction allows slides, its anchor dragged
+    /// along to the friction limit; one that has left the floor lets go.
+    fn move_anchors(&mut self) {
+        let frames = self.frames(&self.q);
+        for (link, l) in self.links.iter().enumerate() {
+            for k in 0..8 {
+                let at = frames[link].0 + frames[link].1 * (l.com + l.half * corner_sign(k));
+                // The limit from how far the corner presses in, not the damper's share, which
+                // the contact's buzz would flick to zero, letting go of the anchor each time.
+                let most = GROUND_FRICTION * GROUND_STIFFNESS * -at.y / GROUND_HOLD;
+                let anchor = &mut self.anchors[8 * link + k];
+                *anchor = match *anchor {
+                    _ if l.mass == 0.0 || at.y >= 0.0 => None,
+                    None => Some(at),
+                    Some(held) => {
+                        let pulled = Vec3::new(held.x - at.x, 0.0, held.z - at.z);
+                        Some(at + pulled.clamp_length_max(most))
+                    }
+                };
+            }
         }
     }
 
@@ -1003,7 +1047,7 @@ const STOP_BELOW: f64 = 0.3;
 /// Imitation: SIMBICON's balance rules with the target angles taken from a recorded walk.
 pub fn imitate(r: &mut Robot) {
     let m = MIMIC;
-    let [stance_side, _, steps, mut landing_start, _] = r.memory;
+    let [stance_side, _, steps, mut landing_start, ..] = r.memory;
     let side = stance_side as usize;
     let (stance, swing) = (WALKER_HIPS[side], WALKER_HIPS[1 - side]);
     let frames = r.frames(&r.q);
@@ -1264,6 +1308,7 @@ pub fn mimic_walk(r: &mut Robot) {
     let capture = com.x + com_vel.x * (0.9f64 / 9.81).sqrt();
     if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && toe > capture {
         r.memory[4] = 1.0;
+        r.held = r.q.clone(); // stand as this footfall left it
     } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
         // Step off with the rear foot: the front one is the stance foot, which puts the
         // walker in the capture's pose at a heel strike, the start of a step.
@@ -1306,34 +1351,37 @@ fn centre_of_mass(r: &Robot, frames: &[(Vec3, Quat)]) -> (Vec3, Vec3) {
     (p / total, v / total)
 }
 
-/// Standing still on both feet, as people do: legs straight and torso upright, and the
-/// ankles keeping the centre of mass over the middle of the feet (the "ankle strategy"),
-/// leaning the shins back when it drifts ahead and forward when it drifts behind.
+/// Standing still, as people do: the ankles leaning the body to keep its centre of mass over
+/// the middle of the feet (the "ankle strategy"). Feet together, the legs stand straight and
+/// the torso upright; stopped mid-stride with the feet apart, every joint is held where the
+/// last step left it (with both feet gripping the floor, two straight legs are a rigid frame).
 fn stand(r: &mut Robot) {
+    if r.held.len() != r.q.len() {
+        r.held = r.q.clone();
+    }
     let frames = r.frames(&r.q);
     let (com, com_vel) = centre_of_mass(r, &frames);
-    let middle = WALKER_HIPS
-        .iter()
-        .map(|&hip| frames[hip + 2].0.x + 0.05) // the ankle, and the foot's centre ahead of it
-        .sum::<f64>()
-        / 2.0;
+    // The middle of the feet, from the rear heel (6 cm behind its ankle) to the front toe
+    // (16 cm ahead of its ankle).
+    let ankles = WALKER_HIPS.map(|hip| frames[hip + 2].0.x);
+    let middle = (ankles[0].min(ankles[1]) - 0.06 + ankles[0].max(ankles[1]) + 0.16) / 2.0;
     let lean = STAND_LEAN.0 * (com.x - middle) + STAND_LEAN.1 * com_vel.x;
+    let apart = (ankles[0] - ankles[1]).abs() > 0.15;
     let (pitch, pitch_rate) = (r.q[WALKER_TORSO], r.qd[WALKER_TORSO]);
     let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
     let mut torque = vec![0.0; r.q.len()];
-    let apart = (frames[WALKER_HIPS[0] + 2].0.x - frames[WALKER_HIPS[1] + 2].0.x).abs() > 0.15;
+    for (i, t) in torque.iter_mut().enumerate().skip(WALKER_TORSO + 1) {
+        *t = pd(r.q[i], r.qd[i], r.held[i], 600.0);
+    }
     for &hip in &WALKER_HIPS {
-        // The hips share holding the torso upright. Feet together, each also holds its thigh
-        // vertical; feet apart (stopped mid-stride) the legs stay planted where the last step
-        // left them, knees straight, an A-frame, the hips only damping their swing.
-        let leg = if apart {
-            -20.0 * r.qd[hip]
-        } else {
-            pd(pitch + r.q[hip], pitch_rate + r.qd[hip], 0.0, 400.0)
-        };
-        torque[hip] = leg - 0.5 * pd(pitch, pitch_rate, MIMIC.lean, 600.0);
-        torque[hip + 1] = pd(r.q[hip + 1], r.qd[hip + 1], -0.05, 600.0);
-        torque[hip + 2] = pd(r.q[hip + 2], r.qd[hip + 2], lean, 400.0);
+        // Feet together: each thigh vertical in the world and the torso held upright through
+        // both hips, so the hips help the ankles balance. Feet apart: the held A-frame.
+        if !apart {
+            torque[hip] = pd(pitch + r.q[hip], pitch_rate + r.qd[hip], 0.0, 400.0)
+                - 0.5 * pd(pitch, pitch_rate, MIMIC.lean, 600.0);
+            torque[hip + 1] = pd(r.q[hip + 1], r.qd[hip + 1], -0.05, 600.0);
+        }
+        torque[hip + 2] = pd(r.q[hip + 2], r.qd[hip + 2], r.held[hip + 2] + lean, 400.0);
     }
     for shoulder in SHOULDERS {
         torque[shoulder] = pd(r.q[shoulder], r.qd[shoulder], 0.0, 60.0);
@@ -1345,6 +1393,6 @@ fn stand(r: &mut Robot) {
     r.target = Some(Vec3::new(com.x, 0.02, com.z));
 }
 
-/// The ankle strategy's gains: ankle angle per metre the centre of mass is ahead of the
-/// feet, and per m/s it moves (negative: toe down, which tips the shins back).
+/// The ankle strategy's gains: ankle angle per metre the centre of mass is beyond the middle
+/// of the feet, and per m/s it moves (negative: toe down, which tips the shins back).
 const STAND_LEAN: (f64, f64) = (-4.0, -1.0);

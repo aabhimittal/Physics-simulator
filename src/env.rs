@@ -251,9 +251,9 @@ impl Env {
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
                 let pose = (-10.0 * robot::imitation_error(r)).exp();
-                let speed = (-8.0 * (r.qd[0] - r.command).powi(2)).exp();
+                let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
-                    0.6 * pose + 0.4 * speed,
+                    0.5 * pose + 0.5 * speed,
                     r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }
