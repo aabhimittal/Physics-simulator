@@ -183,6 +183,7 @@ def main():
     print(f"//! CMU Graphics Lab Motion Capture Database, trials {names}: one person walking")
     print(f"//! at {len(clips)} speeds. Each is one step, from the stance foot's heel strike to the swing")
     print(f"//! foot's, in {SAMPLES} samples. Angles in radians, in the walker's joint conventions.")
+    print("#![allow(clippy::approx_constant)] // measured angles, some near 1/π or log10(2) by chance")
     print()
     print("/// One captured walk, averaged into a single step.")
     print("pub struct Clip {")

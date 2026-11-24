@@ -236,10 +236,11 @@ pub fn crossing() -> (World, Robot) {
     (w, walker_at_kerb())
 }
 
-/// The crossing scene with the car's brakes failed, timed to go wrong: the car starts 125° back
-/// round the road at 50 km/h, so it reaches the zebra crossing just as the person is in its
-/// lane. The driver still sees them and lifts off, but cannot stop. (Of starts every 5°, those
-/// from 105° to 140° back lead to an impact; this is near the middle of that range.)
+/// The crossing scene with the car's brakes failed, timed to go wrong: the car starts 145° back
+/// round the road at 50 km/h, far enough off that the person judges it safe to cross, but
+/// without brakes it cannot stop, and catches them though they hurry. The driver still sees
+/// them and lifts off. (Of starts every 5°, those from 135° to 160° back lead to an impact;
+/// this is near the middle of that range.)
 pub fn crossing_brakes_failed() -> (World, Robot) {
     let (mut w, walker) = crossing();
     let back = 145f64.to_radians();

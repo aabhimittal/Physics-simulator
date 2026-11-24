@@ -2,6 +2,7 @@
 //! CMU Graphics Lab Motion Capture Database, trials 07_04 07_01 07_12: one person walking
 //! at 3 speeds. Each is one step, from the stance foot's heel strike to the swing
 //! foot's, in 50 samples. Angles in radians, in the walker's joint conventions.
+#![allow(clippy::approx_constant)] // measured angles, some near 1/π or log10(2) by chance
 
 /// One captured walk, averaged into a single step.
 pub struct Clip {
