@@ -36,7 +36,7 @@ cp target/wasm32-unknown-unknown/release/physics_simulator.wasm web/sim.wasm
 after changing anything under `src/`.
 
 `.github/workflows/ci.yml` runs on every pull request and push to `main`: `cargo fmt
---check`, the Rust and Python tests, the WebAssembly build, and, on pull requests, a
+--check`, `cargo clippy` with warnings as errors, the Rust and Python tests, the WebAssembly build, and, on pull requests, a
 check that a change to simulation code also updates `web/sim.wasm`. The live site
 (`.github/workflows/pages.yml`) builds `sim.wasm` from source, so it always matches `main`.
 
@@ -68,6 +68,11 @@ conservation, the cart-pole swing-up and recovery, and the arm's tracking error.
   The springs are stiff, so each RK4 stage folds them into the mass matrix through each
   contact point's Jacobian (`Jᵀ(h·C + h²·K)J`): contact stays stable even at one step per
   frame, where the explicit version blew up.
+- **Static friction**: a corner that touches the floor is anchored there and pulled back by
+  a stiff spring; only when that pull passes μ times the load does the anchor slide along
+  (Coulomb friction). Friction as a damper alone, as it was, lets any steady sideways force
+  creep a foot along: a person standing still slid 8 cm a second, and one stopped mid-stride
+  did the splits.
 - **Contact with world bodies** (`Robot::touch`): link corners inside a body, and box
   corners inside a link, are pushed apart by the same kind of spring, and the body gets the
   opposite impulse, so momentum passes both ways.
@@ -157,42 +162,61 @@ smoother, more repeatable hops.
 arm and forearm per side, with motors about as strong as human muscle. It walks by
 **imitating motion capture**, the DeepMimic approach (Peng et al., 2018) in miniature:
 
-1. **A recorded walk.** `python/mocap.py` reads subject 35, trial 2 of the [CMU Graphics
-   Lab Motion Capture Database](http://mocap.cs.cmu.edu/) (which may be copied and
-   redistributed without permission). Forward kinematics gives every joint's 3D position;
-   each limb is projected onto the side-on plane the walker moves in; one gait cycle is cut
-   out at the heel strikes and its left and right halves averaged into one step. The result
-   is `src/mocap_walk.rs`: torso, hip, knee, ankle, shoulder and elbow angles for the
-   stance and swing sides through a 0.57 s step, at 1.25 m/s.
-2. **A tracking controller** (`robot::imitate`) aims every joint at the recorded angle,
-   with SIMBICON's balance rules on top (Yin, Loken and van de Panne, 2007): the stance
-   hip holds the torso upright, and the swing foot lands further ahead the further and
-   faster the body is ahead of the stance foot. Alone it cannot walk: joint springs pull
-   only once a joint is already off target, so they trail the recording, and the best
-   settings a random search found keep it upright only by shuffling on the spot.
+1. **Recorded walks at three speeds.** `python/mocap.py` reads subject 07 of the [CMU
+   Graphics Lab Motion Capture Database](http://mocap.cs.cmu.edu/) (which may be copied and
+   redistributed without permission) walking slowly (trial 4, 0.93 m/s), normally (trial
+   1, 1.36 m/s) and briskly (trial 12, 1.93 m/s). Forward kinematics gives every joint's 3D
+   position; each limb is projected onto the side-on plane the walker moves in; one stride
+   is cut out at the heel strikes and its left and right halves averaged into one step. The
+   result is `src/mocap_walk.rs`: torso, hip, knee, ankle, shoulder and elbow angles for the
+   stance and swing sides through one step of each walk.
+2. **A tracking controller** (`robot::imitate`) aims every joint at the recorded angle for
+   the pace it is asked for (`Robot::command`), blending between the two walks either side
+   of it, with SIMBICON's balance rules on top (Yin, Loken and van de Panne, 2007): the
+   stance hip holds the torso upright, and the swing foot lands further ahead the further
+   and faster the body is ahead of the stance foot. Alone it cannot walk: joint springs pull
+   only once a joint is already off target, so they trail the recording.
 3. **A learned correction** (`robot::mimic_walk`): a network of two 64-unit layers adds up
    to ±0.3 rad to six of those targets (torso, swing hip, knee and ankle, stance knee and
-   ankle). PPO trained it on `env::Task::Imitate` for 1.8M steps (about 15 minutes on 4
-   cores), rewarded for matching the recorded pose and speed, starting each episode at a
-   random point in the stride and shoving the chest with up to 300 N about every two
-   seconds. It sees and acts in stance/swing terms, so one network drives both legs.
+   ankle). PPO trained it on `env::Task::Imitate`, rewarded equally for matching the
+   recorded pose and the pace asked for. Each episode starts at a random point in the
+   stride, or standing still, feet together or stopped mid-stride; about every three
+   seconds the pace asked for changes (0.6 to 1.6 m/s, or a quarter of the time, stop);
+   and about every two seconds the chest is shoved with up to 300 N. It sees and acts in
+   stance/swing terms, so one network drives both legs.
+4. **Standing still** is a separate, hand-written controller (`robot::stand`), as in most
+   game characters and robots. Asked to stop, the walker keeps stepping until a footfall
+   lands past the capture point (the centre of mass plus speed·√(leg/g), where a step must
+   land for the body to come to rest), then holds its pose there, knees straight and feet
+   flat; feet together, the ankles keep the centre of mass over the middle of the feet.
+   Asked to go, it steps off with the rear foot. Because the stop happens inside the
+   controller the policy trained with, the policy learned to arrive at a footfall the
+   standing controller can hold; with a stop bolted on afterwards, it fell.
 
-Measured over seconds 5 to 15:
+Measured over seconds 5 to 15 (normal pace unless stated):
 
-| | Hand-tuned SIMBICON (before) | Motion-capture imitation |
-|---|---|---|
-| Joint angles off the recording (rms) | 14.6° | 6.8° |
-| Speed, cadence, step | 1.14 m/s, 1.9/s, 0.6 m | 1.18 m/s, 1.9/s, 0.61 m |
-| Swing knee at its most bent | | 73° (the recording: 72°) |
-| 250 N shoves survived, both ways through a stride | 36 of 36 | 36 of 36 |
+| | Hand-tuned SIMBICON | One walk (before) | Three walks, pace control |
+|---|---|---|---|
+| Joint angles off the recording (rms) | 14.6° | 6.8° | 7.0° |
+| Speed, cadence, step | 1.14 m/s, 1.9/s, 0.6 m | 1.18 m/s, 1.9/s, 0.61 m | 1.28 m/s, 1.8/s, 0.71 m |
+| Asked 0.8 / 1.36 / 1.6 m/s, walks | | | 0.73 / 1.28 / 1.46 m/s |
+| Stops and stands, then walks on | | | yes |
+| 250 N shoves survived, both ways through a stride | 36 of 36 | 36 of 36 | 36 of 36 |
+
+**Seeds.** Training is not deterministic in outcome, so three seeds were trained (2.5M steps
+each, about 100 minutes with all three sharing 4 cores) and each checked against the whole
+test suite: seed 0 passes every test and is the one committed; seed 1 fails one (its swing
+knee peaks at 49°, the test asks for 50° or more); seed 2 fails two (8.9° off the recording
+against 8°, and it falls while stopping). Before stops were part of training, all three fell
+or failed to come to rest when stopping.
 
 It lands heel first, steps evenly, and once knocked down stops trying to walk (the muscles
-let go). To retrain: `python3 python/train_hopper.py imitate 1800000 0`, then copy
-`ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; PPO results
-vary by seed and checkpoint, so trust the tests, not the training log. Limits: it walks
-in a plane (no hip sway or pelvis twist), knows one walk at one speed (no turning, starting
-or stopping), and the recording's upper arms, held about 30° forward throughout, are
-centred to hang so they don't look like reaching.
+let go). To retrain: `python3 python/train_hopper.py imitate 2500000 0`, then copy
+`ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; trust the tests,
+not the training log. Limits: it walks in a plane (no hip sway or pelvis twist) and cannot
+turn; the brisk end is capped at 1.6 m/s (asked for the captured brisk walk's 1.9 m/s, it
+fell within a second); it walks about 5 to 10% slower than asked; and standing still, it
+withstands a nudge (about 120 N) but a hard shove topples it, where a person would step.
 
 In the browser the links are drawn as a person (tapered limbs, head, hands, shoes,
 clothes); the physics underneath is the same set of boxes.
@@ -284,21 +308,28 @@ it gave them (tested against the same run with nobody in the road). The walker i
 and planar, so it is shoved and dragged rather than thrown over the bonnet. The car's
 autopilot is given the person's position and velocity, like a driver's eyes. Anyone on the road, or due on it within 3 s, makes it cap
 its speed at √(2·a·d), the most from which braking at a = 6 m/s² still stops it in the
-distance d left, aiming to stop with its nose 4 m short. It waits while they cross, then
-drives on; a new person steps off the kerb each time. `tests/vehicle.rs` runs a minute
-of it: several stops, never closer than 5.9 m centre to person. The driver never speeds up
-toward someone in the way; it lifts off and lets the brakes do the rest.
+distance d left, aiming to stop with its nose 4 m short. As at a zebra crossing, it also
+stops for someone waiting at the kerb, if it can do so gently (at 3 m/s²). It waits while
+they cross, then drives on; a new person comes along each time. `tests/vehicle.rs` runs a
+minute of it: several stops, never closer than 5.8 m centre to person. The driver never
+speeds up toward someone in the way; it lifts off and lets the brakes do the rest.
+
+The person judges the car as people do, through the walker's pace command
+(`scenes::pace_for_crossing`): 2 m short of the road they decide, and if the car is under
+3.5 s away and not visibly braking they slow to a stop at the kerb and wait; on the road, a
+car under 2.5 s away and not braking makes them hurry (1.6 m/s). So most crossings are a
+negotiation: the person waits, the car slows, the person goes.
 
 The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene with the
-brake pedal doing nothing, the car placed 125° back round the road at 50 km/h so it arrives
-just as the person is in its lane. The driver still sees them and lifts off, but coasting
-cannot stop it: it strikes them at about 46 km/h and slows as it passes them momentum. The
-timing is staged (starts from 105° to 140° back all lead to an impact); what follows is
-not. A person knocked down lies still for a moment before the next one steps off the kerb.
+brake pedal doing nothing, the car placed 145° back round the road at 50 km/h, far enough
+off that the person judges it safe to step out. The driver sees them and lifts off, the
+person sees it coming and hurries, but coasting cannot stop it: it strikes them at about
+45 km/h and slows as it passes them momentum. The timing is staged (starts from 135° to
+160° back all lead to an impact); what follows is not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
-Limits: the swept sphere is as wide as the tyre is tall, so it can touch a box up to 0.33 m
-to the side of the wheel, where a real 0.2 m tyre would miss it (a cylinder cast is the
-upgrade); the gearbox is automatic only.
+Limits: the tyre is a swept sphere, and a touch further to the side than its 11 cm half
+tread counts as beside the tyre, not under it, so the wheel looks straight down instead (a
+cylinder cast would do this exactly); the gearbox is automatic only.
 
 ## Implicit joint damping
 

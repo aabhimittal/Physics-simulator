@@ -51,6 +51,7 @@ fn bar_pendulum_has_the_textbook_period() {
 }
 
 #[test]
+#[allow(clippy::needless_range_loop)] // reads as the matrix it checks
 fn mass_matrix_is_symmetric() {
     let r = robot::arm();
     let m = r.mass_matrix(&[0.3, -0.8, 1.1, 0.4]);
@@ -235,11 +236,13 @@ fn walker_walks_at_human_speed_and_cadence() {
         );
     }
     // People walk at about 1.2 to 1.4 m/s, 1.8 to 2 steps per second, 0.6 to 0.75 m a step.
+    // The captured person (CMU subject 07) stepped quicker and shorter than most, 2.26 steps a
+    // second at 1.36 m/s, so the walker copying them may too.
     let (speed, cadence) = (r.q[0] / r.time, r.memory[2] / r.time);
     let stride = r.q[0] / r.memory[2];
     println!("{speed:.2} m/s, {cadence:.2} steps/s, {stride:.2} m a step");
     assert!((1.0..1.5).contains(&speed), "{speed:.2} m/s");
-    assert!((1.6..2.2).contains(&cadence), "{cadence:.2} steps/s");
+    assert!((1.6..2.4).contains(&cadence), "{cadence:.2} steps/s");
     assert!((0.5..0.8).contains(&stride), "{stride:.2} m a step");
 }
 
@@ -464,4 +467,92 @@ fn ground_contact_stays_stable_at_one_step_per_frame() {
     }
     close(r.q[0], 0.1, 0.002);
     close(r.qd[0], 0.0, 0.01);
+}
+
+#[test]
+fn walker_stands_still_when_asked_and_shrugs_off_a_nudge() {
+    // Asked for no speed, the walker stands on both feet, its ankles holding its centre of
+    // mass over them; a nudge either way (about 120 N for 0.2 s) sways it but it stays put.
+    for nudge in [0.0, 0.03, -0.03] {
+        let mut r = robot::walker();
+        r.command = 0.0;
+        robot::start_in_stride(&mut r, 0.0);
+        let x0 = r.q[0];
+        let mut x8 = 0.0;
+        for frame in 0..(10.0 / DT) as usize {
+            if frame == 480 {
+                x8 = r.q[0];
+            }
+            r.pull = (nudge != 0.0 && (240..252).contains(&frame)).then(|| Pull {
+                link: TORSO,
+                local: dvec3(0.0, 0.3, 0.0),
+                target: dvec3(r.q[0] + nudge, r.q[1] + 0.3, 0.0),
+            });
+            r.step(DT, 16);
+            assert!(r.q[1] > 0.7, "nudge {nudge}: fell at t = {:.1}", r.time);
+        }
+        assert_eq!(r.memory[4], 1.0, "not standing");
+        assert!(
+            (r.q[0] - x0).abs() < 0.3,
+            "nudge {nudge}: wandered {:.2} m",
+            r.q[0] - x0
+        );
+        // Settled: its feet grip rather than creep (measured over the last 2 s, as the joint
+        // springs keep up a buzz of a few micrometres that a single reading would catch).
+        let creep = (r.q[0] - x8) / 2.0;
+        assert!(
+            creep.abs() < 0.01,
+            "nudge {nudge}: still moving at {creep:.3} m/s"
+        );
+    }
+}
+
+#[test]
+fn walker_follows_the_pace_it_is_asked_for() {
+    // From a slow stroll to a brisk walk: the speed it settles to matches the request.
+    for pace in [0.8, 1.36, 1.6] {
+        let mut r = robot::walker();
+        r.command = pace;
+        robot::start_in_stride(&mut r, 0.0);
+        let mut x5 = 0.0;
+        for frame in 0..(12.0 / DT) as usize {
+            r.step(DT, 16);
+            assert!(r.q[1] > 0.7, "pace {pace}: fell at t = {:.1}", r.time);
+            if frame == 300 {
+                x5 = r.q[0];
+            }
+        }
+        let speed = (r.q[0] - x5) / 7.0;
+        println!("asked {pace:.2} m/s, walked {speed:.2}");
+        assert!(
+            (speed - pace).abs() < 0.2,
+            "asked {pace:.2} m/s, walked {speed:.2}"
+        );
+    }
+}
+
+#[test]
+fn walker_stops_and_sets_off_again() {
+    // Walking, then asked to stop (the request easing off at 0.8 m/s², as the crossing does),
+    // then to walk on: it slows, stands on both feet, and steps off again without falling.
+    let mut r = robot::walker();
+    let (mut stood, mut walked_again, mut x) = (false, false, 0.0);
+    for frame in 0..(16.0 / DT) as usize {
+        let wanted = if (180..480).contains(&frame) {
+            0.0
+        } else {
+            robot::WALKING_SPEED
+        };
+        r.command += (wanted - r.command).clamp(-0.8 * DT, 0.8 * DT);
+        r.step(DT, 16);
+        assert!(r.q[1] > 0.7, "fell at t = {:.1}", r.time);
+        // Standing: in its standing mode, and moved under 2 cm in the last half second.
+        if frame == 440 {
+            x = r.q[0];
+        }
+        stood |= frame == 470 && r.memory[4] == 1.0 && (r.q[0] - x).abs() < 0.02;
+        walked_again |= frame > 800 && r.qd[0] > 1.0;
+    }
+    assert!(stood, "had not come to a stand by t = 7.8 s");
+    assert!(walked_again, "did not walk on");
 }

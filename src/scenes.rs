@@ -236,13 +236,14 @@ pub fn crossing() -> (World, Robot) {
     (w, walker_at_kerb())
 }
 
-/// The crossing scene with the car's brakes failed, timed to go wrong: the car starts 125° back
-/// round the road at 50 km/h, so it reaches the zebra crossing just as the person is in its
-/// lane. The driver still sees them and lifts off, but cannot stop. (Of starts every 5°, those
-/// from 105° to 140° back lead to an impact; this is near the middle of that range.)
+/// The crossing scene with the car's brakes failed, timed to go wrong: the car starts 145° back
+/// round the road at 50 km/h, far enough off that the person judges it safe to cross, but
+/// without brakes it cannot stop, and catches them though they hurry. The driver still sees
+/// them and lifts off. (Of starts every 5°, those from 135° to 160° back lead to an impact;
+/// this is near the middle of that range.)
 pub fn crossing_brakes_failed() -> (World, Robot) {
     let (mut w, walker) = crossing();
-    let back = 125f64.to_radians();
+    let back = 145f64.to_radians();
     let along = Vec3::new(back.sin(), 0.0, -back.cos()); // the way round, clockwise from above
     let b = &mut w.bodies[1];
     b.pos = Vec3::new(30.0 * back.cos(), b.pos.y, 30.0 * back.sin());
@@ -256,9 +257,43 @@ pub fn crossing_brakes_failed() -> (World, Robot) {
     (w, walker)
 }
 
+/// How fast the person at the crossing chooses to walk, as people judge the traffic: at the
+/// kerb they step off only if the car is more than 3.5 s away or visibly braking, and wait
+/// otherwise; on the road, a car under 2.5 s away and not braking makes them hurry. The pace
+/// changes at 0.8 m/s², as the walking policy was trained to follow.
+fn pace_for_crossing(w: &World, walker: &Robot, dt: f64) -> f64 {
+    let car = &w.cars[0];
+    let b = &w.bodies[car.body];
+    let speed = b.vel.length();
+    // Distance round the road to the crossing (at angle 0), driving clockwise from above.
+    let gap = b.pos.z.atan2(b.pos.x).rem_euclid(std::f64::consts::TAU) * 30.0;
+    let arriving = if speed > 1.0 {
+        gap / speed
+    } else {
+        f64::INFINITY
+    };
+    let braking = speed < 1.0 || car.accel.dot(b.vel) / speed.max(1e-9) < -1.0;
+    let x = walker.q[0];
+    // Slowing from walking pace takes about a metre, so they decide by the time they reach
+    // KERB, 2 m short of the road, and come to a stop at its edge.
+    let wanted = if x < KERB && arriving < 3.5 && !braking {
+        0.0 // wait at the kerb
+    } else if (KERB + 1.5..KERB + 9.5).contains(&x) && arriving < 2.5 && !braking {
+        BRISK_SPEED // hurry across
+    } else {
+        robot::WALKING_SPEED
+    };
+    let change = (wanted - walker.command).clamp(-0.8 * dt, 0.8 * dt);
+    walker.command + change
+}
+
+/// A hurried walk (m/s): the fastest the walking policy is trained for. (Up to the captured
+/// brisk walk's 1.9 m/s it fell within a second; see the README.)
+const BRISK_SPEED: f64 = 1.6;
+
 fn walker_at_kerb() -> Robot {
     let mut r = robot::walker();
-    r.q[0] = KERB;
+    r.q[0] = KERB - 2.0;
     r
 }
 
@@ -268,6 +303,7 @@ pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
     // The walker's slides: x along its path, z sideways.
     let at = |v: &[f64]| Vec3::new(v[0], 0.0, v[2]);
     w.cars[0].pedestrian = Some((at(&walker.q), at(&walker.qd)));
+    walker.command = pace_for_crossing(w, walker, dt);
     // The two simulators advance together in short steps, with contact forces between them
     // worked out afresh each time, so the person and the car can collide.
     let steps = 16;

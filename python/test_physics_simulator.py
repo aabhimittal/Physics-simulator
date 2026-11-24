@@ -7,7 +7,7 @@ import physics_simulator as ps
 
 class EnvTest(unittest.TestCase):
     def test_sizes(self):
-        for task, obs, actions in [("balance", 4, 1), ("hop", 9, 2), ("reach", 11, 4), ("imitate", 20, 6)]:
+        for task, obs, actions in [("balance", 4, 1), ("hop", 9, 2), ("reach", 11, 4), ("imitate", 21, 6)]:
             env = ps.Env(task)
             self.assertEqual((env.obs_size, env.action_size), (obs, actions))
             self.assertEqual(len(env.reset(1)), obs)

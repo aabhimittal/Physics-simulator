@@ -1,4 +1,4 @@
-# Checks every pull request and every push to main: formatting, the Rust and Python tests,
+# Checks every pull request and every push to main: formatting, lints, the Rust and Python tests,
 # that the browser simulation still builds, and that a pull request changing simulation
 # code also updates the committed web/sim.wasm.
 name: CI
@@ -20,6 +20,7 @@ jobs:
           fetch-depth: 0 # the sim.wasm check compares against the base branch
       - run: rustup target add wasm32-unknown-unknown
       - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
       - run: cargo test --release
       - name: Python tests
         run: cargo build --release && python3 -m unittest discover python

@@ -11,9 +11,11 @@
 //! why the brakes have ABS. Both directions together are capped by the friction
 //! circle, |F| ≤ μ·load.
 
-use crate::{Body, Quat, Vec3, sphere_cast};
+use crate::{Body, Hit, Quat, Vec3, raycast, sphere_cast};
 
 const RADIUS: f64 = 0.33;
+/// Half the tyre's width.
+const TREAD: f64 = 0.11;
 /// Suspension length (mount to wheel centre) with no load, and how far it can compress.
 const REST: f64 = 0.35;
 const TRAVEL: f64 = 0.2;
@@ -194,7 +196,21 @@ impl Car {
         let hits: Vec<_> = self
             .wheels
             .iter()
-            .map(|w| sphere_cast(bodies, b.pos + b.rot * w.mount, down, RADIUS, REST, me))
+            .map(|w| {
+                let mount = b.pos + b.rot * w.mount;
+                match sphere_cast(bodies, mount, down, RADIUS, REST, me) {
+                    // The sphere is as wide as the tyre is tall: a touch further to the side
+                    // than the tread reaches is beside the tyre, not under it, so look
+                    // straight down instead.
+                    Some(hit) if hit.normal.dot(b.rot * Vec3::Z).abs() * RADIUS > TREAD => {
+                        raycast(bodies, mount, down, REST + RADIUS, me).map(|hit| Hit {
+                            distance: hit.distance - RADIUS,
+                            ..hit
+                        })
+                    }
+                    hit => hit,
+                }
+            })
             .collect();
         let lengths: Vec<f64> = hits
             .iter()
@@ -352,7 +368,7 @@ impl Car {
         let speed2 = b.vel.length_squared();
         self.steer = ((WHEELBASE * curvature).atan() * (1.0 + UNDERSTEER * speed2))
             .clamp(-MAX_STEER, MAX_STEER);
-        let mut wanted: f64 = if (self.time / 8.0) as u64 % 2 == 0 {
+        let mut wanted: f64 = if ((self.time / 8.0) as u64).is_multiple_of(2) {
             15.0
         } else {
             8.0
@@ -361,18 +377,22 @@ impl Car {
         // driver watches someone stepping off the kerb. From speed v a car braking at a stops in
         // v²/2a, so the fastest it may go with d metres left is √(2·a·d). Aim to stop with its
         // centre 6 m short, the nose about 4 m from them.
+        // At a zebra crossing a driver also stops for someone waiting at the kerb, if they can
+        // do so comfortably (at 3 m/s²); too close for that, they carry on and the person waits.
         self.yielding = false;
+        let forward = b.vel.dot(b.rot * Vec3::X);
         if let Some((p, v)) = self.pedestrian {
             let on_road = |at: Vec3| (at.x.hypot(at.z) - radius).abs() < 3.5;
-            let in_the_way = (0..=3).any(|s| on_road(p + v * s as f64));
             let gap = (b.pos.z.atan2(b.pos.x) - p.z.atan2(p.x)).rem_euclid(std::f64::consts::TAU)
                 * radius;
+            let waiting = (p.x.hypot(p.z) - radius).abs() < 5.0 && v.length() < 0.3;
+            let comfortable = gap - 6.0 > forward * forward / (2.0 * 3.0);
+            let in_the_way = (0..=3).any(|s| on_road(p + v * s as f64)) || (waiting && comfortable);
             if in_the_way && gap < 50.0 {
                 self.yielding = true;
                 wanted = wanted.min((2.0 * YIELD_DECELERATION * (gap - 6.0).max(0.0)).sqrt());
             }
         }
-        let forward = b.vel.dot(b.rot * Vec3::X);
         if self.yielding {
             wanted = wanted.min(forward); // never speed up toward someone in the way
         }
@@ -416,7 +436,7 @@ impl Car {
         (b.rot.inverse() * Vec3::Y).z.asin()
     }
 
-    pub const WHEEL_SIZE: (f64, f64) = (RADIUS, 0.11);
+    pub const WHEEL_SIZE: (f64, f64) = (RADIUS, TREAD);
 }
 
 /// Engine torque at `rpm`, from `TORQUE_CURVE`; none past the rev limiter.

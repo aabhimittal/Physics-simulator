@@ -21,7 +21,8 @@ pub enum Task {
     /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
     /// controller's joint targets. Observation and action are in stance/swing order (see
     /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
-    /// its speed.
+    /// the speed asked for, which changes now and then between 0.6 and 1.6 m/s; a quarter of
+    /// episodes start standing still.
     Imitate,
 }
 
@@ -29,6 +30,8 @@ pub enum Task {
 /// knee and ankle; each up to `IMITATE_REACH` radians either way.
 pub const IMITATE_ACTIONS: usize = 6;
 pub const IMITATE_REACH: f64 = 0.3;
+/// The paces (m/s) the walking policy is trained for.
+pub const WALKING_PACE: (f64, f64) = (robot::SLOWEST_WALK, 1.6);
 
 /// Result of one `Env::step`.
 pub struct Step {
@@ -65,6 +68,8 @@ pub struct Env {
     /// Random shoves while imitating: the generator, and the shove's steps left.
     rng: Rng,
     shove_left: u32,
+    /// The walking speed the imitating walker is asked to change to (m/s).
+    pace: f64,
 }
 
 impl Env {
@@ -80,6 +85,7 @@ impl Env {
             steps: 0,
             rng: Rng::new(0),
             shove_left: 0,
+            pace: 0.0,
         };
         env.reset(0);
         env
@@ -116,7 +122,26 @@ impl Env {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
                 r.adjust = vec![0.0; IMITATE_ACTIONS];
-                robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
+                // At any walking pace up to a brisk 1.6 m/s, anywhere in the stride; or, to
+                // learn to step off, standing still: 15% of the time feet together, 15% stopped
+                // mid-stride (feet apart, as `robot::mimic_walk` stands after walking).
+                let pace = |rng: &mut Rng| {
+                    WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform())
+                };
+                let start = rng.uniform();
+                if start < -0.7 {
+                    r.command = 0.0;
+                    robot::start_in_stride(&mut r, 0.0);
+                    r.command = pace(&mut rng);
+                } else if start < -0.4 {
+                    r.command = pace(&mut rng);
+                    robot::start_in_stride(&mut r, 0.0);
+                    r.qd.iter_mut().for_each(|v| *v = 0.0);
+                } else {
+                    r.command = pace(&mut rng);
+                    robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
+                }
+                self.pace = r.command;
             }
             Task::Reach => {
                 let target = Vec3::new(
@@ -175,9 +200,24 @@ impl Env {
         let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
         if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
+            // About every three seconds, asked for a new pace, which the request ramps to at
+            // 0.8 m/s², about as quickly as people change pace: so it learns to speed up, slow
+            // down, and (a quarter of the time) stop, arriving at a footfall the standing
+            // controller can hold (`robot::imitate` hands over to it).
+            if self.rng.uniform() > 1.0 - 1.0 / 90.0 {
+                let u = self.rng.uniform();
+                self.pace = if u < -0.5 {
+                    0.0
+                } else {
+                    WALKING_PACE.0 + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * u)
+                };
+            }
+            let change = self.pace - self.robot.command;
+            self.robot.command += change.clamp(-0.8 * Self::DT, 0.8 * Self::DT);
             // About every two seconds, a shove of up to 300 N either way on the chest for a
             // fifth of a second, so the policy learns to recover as well as to walk.
-            if self.shove_left == 0 && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
+            let standing = self.robot.memory[4] == 1.0;
+            if self.shove_left == 0 && !standing && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
                 let torso = self.robot.frames(&self.robot.q)[robot::WALKER_TORSO];
                 let force = Vec3::X * 300.0 * self.rng.uniform();
                 self.robot.external = vec![robot::Push {
@@ -216,10 +256,15 @@ impl Env {
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
-                let pose = (-10.0 * robot::imitation_error(r)).exp();
-                let speed = (-4.0 * (r.qd[0] - crate::mocap_walk::SPEED).powi(2)).exp();
+                // Standing still holds its pose by itself: only stillness counts then.
+                let pose = if r.memory[4] == 1.0 {
+                    1.0
+                } else {
+                    (-10.0 * robot::imitation_error(r)).exp()
+                };
+                let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
-                    0.7 * pose + 0.3 * speed,
+                    0.5 * pose + 0.5 * speed,
                     r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }
@@ -318,8 +363,10 @@ pub fn walk_policy(obs: &[f64]) -> Vec<f64> {
 /// output), then its biases. Two hidden layers of 64 tanh units, then `outputs` linear ones.
 fn network(stored: &[u8], obs: &[f64], outputs: usize) -> Vec<f64> {
     let mut weights = stored
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64);
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b) as f64);
     let mut x = obs.to_vec();
     for (size, squash) in [(64, true), (64, true), (outputs, false)] {
         let rows: Vec<f64> = weights.by_ref().take(size * x.len()).collect();
