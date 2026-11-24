@@ -363,8 +363,10 @@ pub fn walk_policy(obs: &[f64]) -> Vec<f64> {
 /// output), then its biases. Two hidden layers of 64 tanh units, then `outputs` linear ones.
 fn network(stored: &[u8], obs: &[f64], outputs: usize) -> Vec<f64> {
     let mut weights = stored
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64);
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b) as f64);
     let mut x = obs.to_vec();
     for (size, squash) in [(64, true), (64, true), (outputs, false)] {
         let rows: Vec<f64> = weights.by_ref().take(size * x.len()).collect();
