@@ -121,8 +121,12 @@ pub struct Robot {
     /// whether it is standing still (1) rather than walking (0).
     pub memory: [f64; 5],
     pub pull: Option<Pull>,
-    /// Whether the links collide with the floor at y = 0.
+    /// Whether the links collide with the floor.
     pub ground: bool,
+    /// The floor's side profile: points (x, height), x increasing, joined by straight lines
+    /// (slopes, ramps; a step is two points a hair apart) and level beyond the ends. Empty is
+    /// flat at height 0. It runs unchanged across z, like the walker's world.
+    pub terrain: Vec<[f64; 2]>,
     /// Forces on the links from outside (contact with world bodies, see `touch`), held for
     /// the next step.
     pub external: Vec<Push>,
@@ -158,6 +162,7 @@ impl Robot {
             adjust: Vec::new(),
             command: 0.0,
             anchors: vec![None; 8 * n],
+            terrain: Vec::new(),
             held: Vec::new(),
         }
     }
@@ -295,7 +300,7 @@ impl Robot {
         Vec<f64>,
         Vec<(f64, f64)>,
         Vec<Push>,
-        Vec<(usize, Vec3, bool)>,
+        Vec<(usize, Vec3, Vec3, bool)>,
     ) {
         let (tau, stiff) = (0..q.len())
             .map(|i| {
@@ -343,27 +348,24 @@ impl Robot {
             let vel = self.velocities(&frames, qd);
             for (link, l) in self.links.iter().enumerate() {
                 for k in 0..8 {
-                    let sign =
-                        Vec3::new((k & 1) as f64, (k >> 1 & 1) as f64, (k >> 2) as f64) * 2.0 - 1.0;
-                    let r = frames[link].1 * (l.com + l.half * sign);
+                    let r = frames[link].1 * (l.com + l.half * corner_sign(k));
                     let at = frames[link].0 + r;
-                    if l.mass == 0.0 || at.y >= 0.0 {
+                    let Some((depth, n)) = self.below_floor(at).filter(|_| l.mass > 0.0) else {
                         continue;
-                    }
+                    };
                     let v = vel[link].1 + vel[link].0.cross(r);
-                    let normal = (-GROUND_STIFFNESS * at.y - GROUND_DAMPING * v.y).max(0.0);
-                    let slide = Vec3::new(v.x, 0.0, v.z);
+                    let normal = (GROUND_STIFFNESS * depth - GROUND_DAMPING * v.dot(n)).max(0.0);
+                    let along = |w: Vec3| w - n * w.dot(n); // the part along the surface
                     let anchor = self.anchors[8 * link + k].unwrap_or(at);
-                    let pulled = Vec3::new(anchor.x - at.x, 0.0, anchor.z - at.z);
-                    let wanted = pulled * GROUND_HOLD - slide * GROUND_GRIP;
+                    let wanted = along(anchor - at) * GROUND_HOLD - along(v) * GROUND_GRIP;
                     let limit = GROUND_FRICTION * normal;
                     pushes.push(Push {
                         link,
                         at,
-                        force: Vec3::Y * normal + wanted.clamp_length_max(limit),
+                        force: n * normal + wanted.clamp_length_max(limit),
                     });
                     if normal > 0.0 {
-                        contacts.push((link, at, wanted.length() < limit));
+                        contacts.push((link, at, n, wanted.length() < limit));
                     }
                 }
             }
@@ -412,7 +414,7 @@ impl Robot {
         // it holds, is a damper in x and z. That keeps contact stable at large time steps.
         if !contacts.is_empty() {
             let frames = self.frames(q);
-            for (link, at, holding) in contacts {
+            for (link, at, up, holding) in contacts {
                 let j = self.point_jacobian(&frames, link, at);
                 let normal = h * GROUND_DAMPING + h * h * GROUND_STIFFNESS;
                 let grip = if holding {
@@ -420,10 +422,12 @@ impl Robot {
                 } else {
                     0.0
                 };
+                // Along the surface normal, and across the surface.
+                let jn: Vec<f64> = j.iter().map(|c| c.dot(up)).collect();
+                let jt: Vec<Vec3> = j.iter().zip(&jn).map(|(c, d)| *c - up * *d).collect();
                 for a in 0..n {
                     for b in 0..n {
-                        m[a][b] +=
-                            normal * j[a].y * j[b].y + grip * (j[a].x * j[b].x + j[a].z * j[b].z);
+                        m[a][b] += normal * jn[a] * jn[b] + grip * jt[a].dot(jt[b]);
                     }
                 }
             }
@@ -482,23 +486,72 @@ impl Robot {
     /// along to the friction limit; one that has left the floor lets go.
     fn move_anchors(&mut self) {
         let frames = self.frames(&self.q);
-        for (link, l) in self.links.iter().enumerate() {
+        for (link, (o, rot)) in frames.iter().enumerate() {
+            let l = &self.links[link];
             for k in 0..8 {
-                let at = frames[link].0 + frames[link].1 * (l.com + l.half * corner_sign(k));
-                // The limit from how far the corner presses in, not the damper's share, which
-                // the contact's buzz would flick to zero, letting go of the anchor each time.
-                let most = GROUND_FRICTION * GROUND_STIFFNESS * -at.y / GROUND_HOLD;
-                let anchor = &mut self.anchors[8 * link + k];
-                *anchor = match *anchor {
-                    _ if l.mass == 0.0 || at.y >= 0.0 => None,
-                    None => Some(at),
-                    Some(held) => {
-                        let pulled = Vec3::new(held.x - at.x, 0.0, held.z - at.z);
-                        Some(at + pulled.clamp_length_max(most))
+                let at = *o + *rot * (l.com + l.half * corner_sign(k));
+                let below = self.below_floor(at).filter(|_| l.mass > 0.0);
+                let anchor = self.anchors[8 * link + k];
+                self.anchors[8 * link + k] = match (below, anchor) {
+                    (None, _) => None,
+                    (Some(_), None) => Some(at),
+                    (Some((depth, n)), Some(held)) => {
+                        // The limit from how far the corner presses in, not the damper's share,
+                        // which the contact's buzz would flick to zero, letting go each time.
+                        let most = GROUND_FRICTION * GROUND_STIFFNESS * depth / GROUND_HOLD;
+                        let pulled = held - at;
+                        Some(at + (pulled - n * pulled.dot(n)).clamp_length_max(most))
                     }
                 };
             }
         }
+    }
+
+    /// The floor's height under `x`.
+    pub fn floor_height(&self, x: f64) -> f64 {
+        let t = &self.terrain;
+        match t.iter().position(|p| p[0] > x) {
+            None => t.last().map_or(0.0, |p| p[1]),
+            Some(0) => t[0][1],
+            Some(i) => {
+                let ([x0, y0], [x1, y1]) = (t[i - 1], t[i]);
+                y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+            }
+        }
+    }
+
+    /// How deep point `p` is below the floor, and the way out (unit): to the nearest point of
+    /// the profile, so off a slope square to it and off a step's face sideways.
+    fn below_floor(&self, p: Vec3) -> Option<(f64, Vec3)> {
+        let height = self.floor_height(p.x);
+        if p.y >= height {
+            return None;
+        }
+        if self.terrain.is_empty() {
+            return Some((-p.y, Vec3::Y));
+        }
+        // The profile with level runs out past each end; only segments within a metre can
+        // be nearest, as no link is that deep.
+        let t = &self.terrain;
+        let (first, last) = (t[0], t[t.len() - 1]);
+        let ends = [
+            [[first[0] - 1e3, first[1]], first],
+            [last, [last[0] + 1e3, last[1]]],
+        ];
+        let from = t.partition_point(|q| q[0] < p.x - 1.0).saturating_sub(1);
+        let to = t.partition_point(|q| q[0] <= p.x + 1.0).min(t.len() - 1);
+        t[from..=to]
+            .windows(2)
+            .map(|w| [w[0], w[1]])
+            .chain(ends)
+            .map(|[a, b]| {
+                let (a, b) = (Vec3::new(a[0], a[1], p.z), Vec3::new(b[0], b[1], p.z));
+                let along = ((p - a).dot(b - a) / (b - a).length_squared()).clamp(0.0, 1.0);
+                a + (b - a) * along
+            })
+            .map(|q| ((q - p).length(), q))
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .map(|(depth, q)| (depth, ((q - p) / depth.max(1e-9)).normalize_or(Vec3::Y)))
     }
 
     /// Contact between the links and the world's bodies (not the ground plane, which
@@ -1222,15 +1275,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
     let frames = r.frames(&r.q);
     let low = [stance + 2, swing + 2]
         .into_iter()
-        .flat_map(|foot| {
-            let (o, rot) = frames[foot];
-            let l = &r.links[foot];
-            (0..4).map(move |k| {
-                (o + rot
-                    * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1])))
-                .y
-            })
-        })
+        .map(|foot| sole_height(r, &frames, foot))
         .fold(f64::INFINITY, f64::min);
     r.q[1] = -low + 0.002;
     r.qd[0] = speed;
@@ -1274,7 +1319,7 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
         (tau * phase).sin(),
         (tau * phase).cos(),
         phase,
-        r.q[1],
+        hip_height(r),
         r.qd[1],
         r.qd[0],
         r.q[WALKER_TORSO],
@@ -1293,7 +1338,7 @@ pub fn mimic_walk(r: &mut Robot) {
     use crate::env::{IMITATE_REACH, walk_policy};
     // Once down, a person stops trying to walk: the muscles let go (joint friction remains),
     // rather than the policy flailing a body it was never trained to move.
-    if r.q[1] < 0.6 || r.q[WALKER_TORSO].abs() > 1.0 {
+    if hip_height(r) < 0.6 || r.q[WALKER_TORSO].abs() > 1.0 {
         r.ctrl.iter_mut().for_each(|c| *c = 0.0);
         return;
     }
@@ -1344,10 +1389,16 @@ fn sole_height(r: &Robot, frames: &[(Vec3, Quat)], foot: usize) -> f64 {
     let l = &r.links[foot];
     (0..4)
         .map(|k| {
-            (o + rot * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1])))
-                .y
+            let p = o + rot
+                * (l.com + l.half * Vec3::new([-1.0, 1.0][k & 1], -1.0, [-1.0, 1.0][k >> 1]));
+            p.y - r.floor_height(p.x)
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+/// The walker's hip height above the floor beneath it.
+pub fn hip_height(r: &Robot) -> f64 {
+    r.q[1] - r.floor_height(r.q[0])
 }
 
 /// The whole body's centre of mass and its velocity.

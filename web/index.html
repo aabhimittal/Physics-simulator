@@ -66,6 +66,7 @@
   }
   button:hover { border-color: var(--accent); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  [hidden] { display: none !important; } /* or a flex row's display would show it */
   button[aria-pressed="true"], #fire { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 </style>
 
@@ -182,6 +183,32 @@ for (let x = 27; x <= 33; x += 1) {
 markings.traverse(o => { o.receiveShadow = true; });
 zebra.traverse(o => { o.receiveShadow = true; });
 scene.add(markings, zebra);
+
+// The walker's floor profile (slopes, steps, the pavement and its dropped kerbs), extruded
+// across the path: a top surface and a side face down to the ground.
+const terrainMaterial = new THREE.MeshStandardMaterial({ color: 0xb9b2a6, roughness: 0.9 });
+let terrainMesh = null;
+function buildTerrain(halfWidth) {
+  if (terrainMesh) { scene.remove(terrainMesh); terrainMesh.geometry.dispose(); terrainMesh = null; }
+  const n = wasm.terrain(0, 2);
+  if (!n) return;
+  const p = [...Array(n)].map((_, i) => [wasm.terrain(i, 0), wasm.terrain(i, 1)]);
+  p.unshift([p[0][0] - 60, p[0][1]]); p.push([p[n][0] + 60, p[n][1]]); // level beyond the ends
+  const v = [];
+  const quad = (a, b, c, d) => v.push(...a, ...b, ...c, ...a, ...c, ...d);
+  for (let i = 0; i + 1 < p.length; i++) {
+    const [[x0, y0], [x1, y1]] = [p[i], p[i + 1]];
+    quad([x0, y0, halfWidth], [x1, y1, halfWidth], [x1, y1, -halfWidth], [x0, y0, -halfWidth]);
+    quad([x0, 0, halfWidth], [x1, 0, halfWidth], [x1, y1, halfWidth], [x0, y0, halfWidth]);
+    quad([x1, 0, -halfWidth], [x0, 0, -halfWidth], [x0, y0, -halfWidth], [x1, y1, -halfWidth]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  g.computeVertexNormals();
+  terrainMesh = new THREE.Mesh(g, terrainMaterial);
+  terrainMesh.receiveShadow = terrainMesh.castShadow = true;
+  scene.add(terrainMesh);
+}
 let tailLights = null;
 
 // The walking person drawn as a person: rounded, tapered limbs in clothes, over the same
@@ -330,6 +357,7 @@ function loadScene(id) {
   [...$('pace').children].forEach(b => b.setAttribute('aria-pressed', String(b.dataset.pace === '1.36')));
   road.visible = markings.visible = !!(SCENES[id].car || SCENES[id].crossing);
   zebra.visible = !!SCENES[id].crossing;
+  buildTerrain(SCENES[id].crossing ? 1.5 : 0.8);
   tailLights = null;
   const watching = SCENES[id].learning || SCENES[id].trained; // these robots cannot be dragged
   $('hint').textContent = (watching ? 'Drag' : 'Drag an object to pull it around. Drag empty space') + ' to look around, scroll to zoom'

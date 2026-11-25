@@ -265,7 +265,7 @@ impl Env {
                 let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
                 (
                     0.5 * pose + 0.5 * speed,
-                    r.q[1] < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
+                    robot::hip_height(r) < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }
         };

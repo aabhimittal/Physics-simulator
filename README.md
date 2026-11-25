@@ -210,6 +210,19 @@ knee peaks at 49°, the test asks for 50° or more); seed 2 fails two (8.9° off
 against 8°, and it falls while stopping). Before stops were part of training, all three fell
 or failed to come to rest when stopping.
 
+**Uneven ground.** The floor is a side profile, `Robot::terrain`: points joined by straight
+lines (slopes, ramps; a step is two points a hair apart). A link corner below it is pushed
+out to the nearest point of the profile, so off a slope square to the surface and off a
+step's face sideways (a toe catches on a step rather than being lifted onto it); friction,
+static friction's anchors included, works in the surface's own plane. The policy was trained
+on flat ground and cannot see the terrain, yet it walks random courses of 8% slopes and 5 cm
+steps (10 of 10), climbs 16%, and steps down 12 cm. It falls going down slopes of 12% or
+more, and trips on steps up of 10 cm or more: its toe clears the ground by about 8 cm and it
+does not know the step is there. So the crossing's pavement, 10 cm above the road, meets it
+in dropped kerbs, 1.25 m ramps of 8% (about the steepest UK guidance allows), and the walking
+scene's course keeps to ramps of 6% and steps of 4 cm. Letting the policy see the ground
+ahead, and training it on rough terrain, is the upgrade for real kerbs and stairs.
+
 It lands heel first, steps evenly, and once knocked down stops trying to walk (the muscles
 let go). To retrain: `python3 python/train_hopper.py imitate 2500000 0`, then copy
 `ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; trust the tests,
@@ -324,7 +337,7 @@ The **Brakes fail** button (`scenes::crossing_brakes_failed`) restarts the scene
 brake pedal doing nothing, the car placed 145° back round the road at 50 km/h, far enough
 off that the person judges it safe to step out. The driver sees them and lifts off, the
 person sees it coming and hurries, but coasting cannot stop it: it strikes them at about
-45 km/h and slows as it passes them momentum. The timing is staged (starts from 135° to
+45 km/h and slows as it passes them momentum. The timing is staged (starts from 130° to
 160° back all lead to an impact); what follows is not. A person knocked down lies still for a moment before the next one steps off the kerb.
 
 Limits: the tyre is a swept sphere, and a touch further to the side than its 11 cm half

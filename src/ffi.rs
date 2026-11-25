@@ -39,7 +39,11 @@ pub extern "C" fn load(scene: u32) {
         s.player = (kind == Kind::Trained).then(|| Player::new(1));
         s.robot = match kind {
             Kind::Robot => Some(robot::demo(scene - scenes::FIRST_ROBOT_SCENE)),
-            Kind::Walking => Some(robot::walker()),
+            Kind::Walking => Some({
+                let mut r = robot::walker();
+                r.terrain = scenes::walking_course();
+                r
+            }),
             _ => None,
         };
         s.world = scenes::load(scene); // empty in the robot scenes
@@ -294,6 +298,20 @@ pub extern "C" fn walker(field: u32) -> f64 {
                 _ => r.qd[0],
             }
         })
+    })
+}
+
+/// The walker's floor profile, for drawing: point count, then point `i`'s x (`coord` 0) or
+/// height (1).
+#[unsafe(no_mangle)]
+pub extern "C" fn terrain(i: u32, coord: u32) -> f64 {
+    with(|s| {
+        let Some(r) = &s.robot else { return 0.0 };
+        match r.terrain.get(i as usize) {
+            _ if coord > 1 => r.terrain.len() as f64,
+            Some(p) => p[coord as usize],
+            None => 0.0,
+        }
     })
 }
 

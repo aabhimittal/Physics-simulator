@@ -556,3 +556,45 @@ fn walker_stops_and_sets_off_again() {
     assert!(stood, "had not come to a stand by t = 7.8 s");
     assert!(walked_again, "did not walk on");
 }
+
+#[test]
+fn walker_crosses_uneven_ground() {
+    // Random courses of slopes up to 8% and steps up to 5 cm up or down, and the crossing's
+    // pavement with its dropped kerbs: the walker, trained on flat ground, walks 15 s of each.
+    use physics_simulator::env::Rng;
+    let course = |seed| {
+        let mut rng = Rng::new(seed);
+        let (mut x, mut y, mut points) = (3.0, 0.0, vec![[3.0, 0.0]]);
+        while x < 30.0 {
+            if rng.uniform() > 0.4 {
+                (x, y) = (x + 0.01, y + 0.05 * rng.uniform());
+                points.push([x, y]);
+            }
+            let run = 2.0 + rng.uniform();
+            (x, y) = (x + run, y + 0.08 * rng.uniform() * run);
+            points.push([x, y]);
+        }
+        points
+    };
+    let pavement = physics_simulator::scenes::pavement()
+        .iter()
+        .map(|[x, y]| [x - 22.0, *y])
+        .collect();
+    for (name, terrain) in (0..5)
+        .map(|s| (format!("course {s}"), course(s)))
+        .chain([("pavement".into(), pavement)])
+    {
+        let mut r = robot::walker();
+        r.terrain = terrain;
+        robot::start_in_stride(&mut r, 0.0);
+        for _ in 0..(15.0 / DT) as usize {
+            r.step(DT, 16);
+            assert!(
+                robot::hip_height(&r) > 0.7 && r.q[TORSO].abs() < 0.6,
+                "{name}: fell at t = {:.1}",
+                r.time
+            );
+        }
+        assert!(r.q[0] > 15.0, "{name}: only {:.1} m in 15 s", r.q[0]);
+    }
+}
