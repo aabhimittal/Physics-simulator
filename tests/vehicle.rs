@@ -1,6 +1,7 @@
 //! Checks the car against textbook vehicle dynamics.
 
 use glam::DVec3 as Vec3;
+use physics_simulator::robot;
 use physics_simulator::scenes::{self, CAR_SCENE};
 use physics_simulator::vehicle::{Car, WHEELBASE};
 use physics_simulator::{Body, Shape, World};
@@ -368,6 +369,7 @@ fn coast_into_person(person_x: f64) -> (f64, f64, f64) {
         Vec3::new(0.0, 0.0, -8.0),
     );
     walker.q[0] = person_x;
+    robot::start_in_stride(&mut walker, 0.0); // on the road surface, not the pavement's height
     let mut fastest = 0f64;
     for _ in 0..(3.0 / DT) as usize {
         scenes::step_crossing(&mut w, &mut walker, DT);
@@ -385,7 +387,7 @@ fn a_car_that_does_not_stop_hits_the_person_and_both_feel_it() {
     let (missed, _, _) = coast_into_person(100.0); // nobody in the road: drag and rolling only
     // The person walks at 1.25 m/s from the start, so starting 1.8 m short of the car's line
     // puts them in its way as it arrives (any start from 27.8 to 28.6 m hits).
-    let (hit, thrown, carried) = coast_into_person(28.2);
+    let (hit, thrown, carried) = coast_into_person(28.6);
     println!(
         "car ends at {hit:.2} m/s (at {missed:.2} with nobody there); person thrown at up to {thrown:.1} m/s, carried {carried:.1} m"
     );

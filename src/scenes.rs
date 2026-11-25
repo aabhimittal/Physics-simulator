@@ -239,7 +239,7 @@ pub fn crossing() -> (World, Robot) {
 /// The crossing scene with the car's brakes failed, timed to go wrong: the car starts 145° back
 /// round the road at 50 km/h, far enough off that the person judges it safe to cross, but
 /// without brakes it cannot stop, and catches them though they hurry. The driver still sees
-/// them and lifts off. (Of starts every 5°, those from 135° to 160° back lead to an impact;
+/// them and lifts off. (Of starts every 5°, those from 130° to 160° back lead to an impact;
 /// this is near the middle of that range.)
 pub fn crossing_brakes_failed() -> (World, Robot) {
     let (mut w, walker) = crossing();
@@ -293,8 +293,41 @@ const BRISK_SPEED: f64 = 1.6;
 
 fn walker_at_kerb() -> Robot {
     let mut r = robot::walker();
+    r.terrain = pavement();
     r.q[0] = KERB - 2.0;
+    robot::start_in_stride(&mut r, 0.0);
     r
+}
+
+/// The person's path across the road: pavement 10 cm above the road on either side, with a
+/// dropped kerb (a 1.25 m ramp, 8%, the steepest UK guidance allows) down to it and up again.
+pub fn pavement() -> Vec<[f64; 2]> {
+    vec![[25.25, 0.1], [26.5, 0.0], [33.5, 0.0], [34.75, 0.1]]
+}
+
+/// The walking scene's course, repeating every 24 m: a gentle ramp up (6%), a 4 cm step up
+/// and down, a ramp back down, and two low bumps. All within what the walker, trained on flat
+/// ground, handles (see the README).
+pub fn walking_course() -> Vec<[f64; 2]> {
+    let lap: [[f64; 2]; 14] = [
+        [4.0, 0.0],
+        [7.0, 0.18],
+        [9.0, 0.18],
+        [9.01, 0.22],
+        [11.0, 0.22],
+        [11.01, 0.18],
+        [13.0, 0.18],
+        [16.0, 0.0],
+        [17.5, 0.0],
+        [18.0, 0.04],
+        [18.5, 0.0],
+        [20.0, 0.0],
+        [20.5, 0.04],
+        [21.0, 0.0],
+    ];
+    (0..25)
+        .flat_map(|k| lap.map(|[x, y]| [x + 24.0 * k as f64, y]))
+        .collect()
 }
 
 /// Advances the crossing scene one frame. Once across, the person is replaced by a new one
