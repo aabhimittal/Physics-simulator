@@ -267,6 +267,11 @@ impl Robot {
     }
 
     /// Angular velocity and frame-origin velocity of every link.
+    /// Every link's angular and linear velocity now (as `velocities`), for controllers.
+    pub fn velocities_at(&self, frames: &[(Vec3, Quat)]) -> Vec<(Vec3, Vec3)> {
+        self.velocities(frames, &self.qd)
+    }
+
     fn velocities(&self, frames: &[(Vec3, Quat)], qd: &[f64]) -> Vec<(Vec3, Vec3)> {
         let mut out: Vec<(Vec3, Vec3)> = Vec::with_capacity(self.links.len());
         for (i, l) in self.links.iter().enumerate() {

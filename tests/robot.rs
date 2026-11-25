@@ -598,3 +598,44 @@ fn walker_crosses_uneven_ground() {
         assert!(r.q[0] > 15.0, "{name}: only {:.1} m in 15 s", r.q[0]);
     }
 }
+
+#[test]
+fn walker_in_3d_walks_and_catches_itself_sideways() {
+    // The 3D body, free to fall sideways and turn, under its hand-written 3D SIMBICON: it
+    // walks 12 s, and sideways shoves (about 120 and 200 N for 0.2 s, either way, at four
+    // moments of the stride) mostly make it step out and recover. Mostly: this controller
+    // works in a narrow band, so the test asks for 10 of 16, not all.
+    use physics_simulator::walker3d::{self, ROLL, TORSO};
+    let walk = |shove: f64, at: usize| {
+        let mut r = walker3d::walker3d();
+        for frame in 0..(12.0 / DT) as usize {
+            r.pull = (shove != 0.0 && (at..at + 12).contains(&frame)).then(|| Pull {
+                link: TORSO,
+                local: dvec3(0.0, 0.3, 0.0),
+                target: dvec3(r.q[0], r.q[1] + 0.3, r.q[2] + shove),
+            });
+            r.step(DT, 16);
+            if r.q[1] < 0.7 || r.q[TORSO].abs() > 0.6 || r.q[ROLL].abs() > 0.6 {
+                return None;
+            }
+        }
+        Some((r.q[0], r.q[2]))
+    };
+    // Starting from standing tips it sideways at first; it settles, having drifted about 1.3 m.
+    let (distance, drift) = walk(0.0, 0).expect("fell without being shoved");
+    assert!(distance > 8.0, "only {distance:.1} m in 12 s");
+    assert!(drift.abs() < 1.8, "drifted {drift:.1} m sideways");
+    let shoves = [0.03, -0.03, 0.05, -0.05];
+    let survived = shoves
+        .iter()
+        .flat_map(|&s| [300, 315, 330, 345].map(|at| walk(s, at).is_some()))
+        .filter(|&ok| ok)
+        .count();
+    println!(
+        "{distance:.1} m in 12 s, {drift:.1} m sideways; survived {survived} of 16 sideways shoves"
+    );
+    assert!(
+        survived >= 10,
+        "survived only {survived} of 16 sideways shoves"
+    );
+}

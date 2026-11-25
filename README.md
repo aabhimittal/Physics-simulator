@@ -234,6 +234,24 @@ withstands a nudge (about 120 N) but a hard shove topples it, where a person wou
 In the browser the links are drawn as a person (tapered limbs, head, hands, shoes,
 clothes); the physics underneath is the same set of boxes.
 
+### Walking in 3D
+
+`src/walker3d.rs`. The same body with the plane taken away: 22 joints, the torso free to
+roll and turn, hips that also swing out and twist, ankles that also roll. Its controller is
+written by hand, not learned: SIMBICON (Yin, Loken and van de Panne, 2007) in both
+directions. Forward, the swing leg lands further ahead the further and faster the body is
+ahead of the stance foot, as in the planar walker. Sideways, the same rule with its own two
+gains puts the swing foot out under a body that is tipping that way, which is how people
+catch themselves when shoved. The stance hip holds the torso level and facing ahead, and
+each foot rolls to lie flat.
+
+`walker_in_3d_walks_and_catches_itself_sideways` walks it 12 s (10.7 m) and shoves it
+sideways (about 120 and 200 N for 0.2 s) at four moments of the stride: it recovers from 12
+of 16. Limits, honestly: the sideways gains work in a narrow band (their grid neighbours
+fall); starting from standing tips it sideways for the first few seconds, so it drifts about
+1.3 m before settling into a straight 1.3 m/s walk; it cannot turn on purpose; and it does
+not use the motion-capture policy. Training that policy in 3D is the upgrade.
+
 ## Car
 
 `src/vehicle.rs` is a raycast vehicle, the usual game-engine design: a rigid body in

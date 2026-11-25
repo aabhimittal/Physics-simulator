@@ -129,6 +129,8 @@ SCENES[12] = { name: 'Car', car: true, follow: 0, group: 1, view: [-0.5, 1.15, 1
   note: 'A 1200 kg car on four springs. Each tyre grips according to how much it slips, so in the bends the body rolls, the outer tyres carry most of the weight, and the front tyres point a few degrees inside the way the car goes. It speeds up and brakes every 8 s. Drive it yourself with the arrow keys or WASD, into the crates if you like.' };
 SCENES[13] = { name: 'Walking person', robot: true, walking: true, follow: 3, person: true, group: 3, view: [0.5, 1.3, 5, [0, 0.9, 0]],
   note: 'A 70 kg body with hip, knee and ankle motors about as strong as human muscle, and no animation: every step is physics. Its joints aim for the angles of one real person walking slowly, normally and briskly, recorded by motion capture and blended by speed, and a small neural network trained by trial and error corrects them so it keeps its balance. Stand stops it on both feet, balancing at the ankles; Walk and Hurry set it off. A small tug on the torso makes it stumble and recover; yank it and it falls (Reset stands it up again).' };
+SCENES[15] = { name: 'Walking in 3D', robot: true, walking3d: true, follow: 5, person: true, group: 3, view: [0.9, 1.25, 6, [0, 0.9, 0]],
+  note: 'The same body free to fall sideways and turn: 22 joints, with hips that also swing out and twist and ankles that also roll. A hand-written controller (SIMBICON in 3D, no learning) balances it the way people do in both directions, stepping further ahead when it pitches forward and further out when it tips sideways. Tug it sideways to watch it catch itself.' };
 SCENES[14] = { name: 'Crossing', robot: true, crossing: true, person: true, group: 1, view: [Math.PI, 1.2, 16, [30.5, 0.6, 3]],
   note: 'The same car and the same walking person, now sharing the road. The car sees someone stepping off the kerb, works out where it must start braking to stop 4 m short (from v² = 2·a·d), waits while they cross, and drives on; it also stops for someone waiting at the zebra if it can do so gently. The person judges the car as people do: they wait at the kerb if it is close and not slowing, and hurry if it bears down on them mid-crossing. Nobody is scripted: the car brakes through its tyres and the person walks on their own legs. Press Brakes fail to see what happens when it cannot stop: the two collide, and momentum passes between them.' };
 const DT = 1 / 60;
@@ -420,6 +422,8 @@ function sync() {
     ? `Car ${wasm.car(0).toFixed(0)} km/h · ${wasm.car(9) ? (wasm.car(5) ? 'BRAKES FAILED, coasting toward the person crossing' : 'brakes failed')
       : wasm.car(5) ? 'braking for the person crossing' : 'road clear, driving on'}`
       + ` · person ${wasm.walker(4) ? 'waiting at the kerb' : wasm.walker(3) > 1.5 ? 'hurrying' : 'walking'}`
+    : SCENES[current].walking3d
+    ? `${wasm.walker(1)} steps · ${wasm.walker(0).toFixed(2)} m/s average · drifted ${wasm.walker(6).toFixed(2)} m sideways`
     : SCENES[current].walking
     ? (wasm.walker(4) ? `Standing still · ${wasm.walker(1)} steps taken`
       : `Walking, asked for ${wasm.walker(3).toFixed(2)} m/s · ${wasm.walker(1)} steps taken`)
@@ -517,7 +521,7 @@ function steerByKeys() {
   wasm.drive(keys.has('up') - keys.has('down'), keys.has('left') - keys.has('right'));
 }
 
-[14, 13, 12, 9, 11, 10, 6, 7, 8, 5, 0, 1, 2, 3, 4].forEach(id => { // robots and vehicles first
+new Set([15, 14, 13, 12, 9, 11, 10, 6, 7, 8, 5, ...SCENES.keys()]).forEach(id => { // robots and vehicles first, then the rest
   const s = SCENES[id];
   const b = document.createElement('button');
   b.type = 'button';
@@ -563,7 +567,7 @@ fetch('sim.wasm')
     wasm = instance.exports;
     // Scene ids are defined in src/scenes.rs. Check this page's list against them, so a
     // mismatch shows up at once rather than as the wrong scene behind a button.
-    const kindOf = s => s.crossing ? 6 : s.walking ? 5 : s.car ? 4 : s.trained ? 3 : s.learning ? 2 : s.robot ? 1 : 0;
+    const kindOf = s => s.walking3d ? 7 : s.crossing ? 6 : s.walking ? 5 : s.car ? 4 : s.trained ? 3 : s.learning ? 2 : s.robot ? 1 : 0;
     const wrong = SCENES.flatMap((s, id) => wasm.scene_kind(id) === kindOf(s) ? [] : [`${id} (${s.name})`]);
     if (wasm.scene_kind(SCENES.length) >>> 0 !== 0xffffffff) wrong.push('scenes after the last one on this page');
     if (wrong.length) console.error(`Scene list out of step with src/scenes.rs: ${wrong.join(', ')}`);

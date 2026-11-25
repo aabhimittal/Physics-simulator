@@ -44,6 +44,7 @@ pub extern "C" fn load(scene: u32) {
                 r.terrain = scenes::walking_course();
                 r
             }),
+            Kind::Walking3d => Some(crate::walker3d::walker3d()),
             _ => None,
         };
         s.world = scenes::load(scene); // empty in the robot scenes
@@ -283,7 +284,7 @@ pub extern "C" fn car(field: u32) -> f64 {
 }
 
 /// Walker readout: `[average speed m/s, steps taken, steps per second, pace asked for m/s,
-/// standing (1) or walking (0), speed now m/s]`.
+/// standing (1) or walking (0), speed now m/s, sideways position m]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn walker(field: u32) -> f64 {
     with(|s| {
@@ -295,7 +296,8 @@ pub extern "C" fn walker(field: u32) -> f64 {
                 2 => r.memory[2] / time,
                 3 => r.command,
                 4 => r.memory[4],
-                _ => r.qd[0],
+                5 => r.qd[0],
+                _ => r.q[2],
             }
         })
     })
@@ -334,7 +336,7 @@ pub extern "C" fn robot_first_drawn() -> u32 {
 }
 
 /// What scene `id` runs, as `scenes::Kind` (0 world, 1 robot, 2 learning, 3 trained hopper,
-/// 4 car, 5 walking, 6 crossing), or `u32::MAX` past the last scene. The page checks its
+/// 4 car, 5 walking, 6 crossing, 7 walking in 3D), or `u32::MAX` past the last scene. The page checks its
 /// scene list against this.
 #[unsafe(no_mangle)]
 pub extern "C" fn scene_kind(id: u32) -> u32 {
@@ -344,9 +346,18 @@ pub extern "C" fn scene_kind(id: u32) -> u32 {
 /// Which body part walker link `link` is, as `robot::Part` (0 is not drawn).
 #[unsafe(no_mangle)]
 pub extern "C" fn walker_part(link: u32) -> u32 {
-    robot::WALKER_PARTS
-        .get(link as usize)
-        .map_or(0, |&p| p as u32)
+    with(|s| {
+        let three_d = s
+            .robot
+            .as_ref()
+            .is_some_and(|r| r.links.len() == crate::walker3d::PARTS.len());
+        let parts: &[robot::Part] = if three_d {
+            &crate::walker3d::PARTS
+        } else {
+            &robot::WALKER_PARTS
+        };
+        parts.get(link as usize).map_or(0, |&p| p as u32)
+    })
 }
 
 /// Crossing scene: start it again with the car's brakes failed (1), timed to reach the

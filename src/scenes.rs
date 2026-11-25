@@ -17,7 +17,9 @@ pub const CAR_SCENE: u32 = 12;
 pub const WALK_SCENE: u32 = 13;
 /// The person walking across the car's road; see `crossing`.
 pub const CROSSING_SCENE: u32 = 14;
-pub const SCENE_COUNT: u32 = 15;
+/// The walking person in three dimensions, `walker3d::walker3d`.
+pub const WALK3D_SCENE: u32 = 15;
+pub const SCENE_COUNT: u32 = 16;
 
 /// What a scene id runs. The web page derives the same from its own scene list.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -30,6 +32,7 @@ pub enum Kind {
     Car,
     Walking,
     Crossing,
+    Walking3d,
 }
 
 pub fn kind(id: u32) -> Option<Kind> {
@@ -41,6 +44,7 @@ pub fn kind(id: u32) -> Option<Kind> {
         CAR_SCENE => Kind::Car,
         WALK_SCENE => Kind::Walking,
         CROSSING_SCENE => Kind::Crossing,
+        WALK3D_SCENE => Kind::Walking3d,
         _ => return None,
     })
 }
