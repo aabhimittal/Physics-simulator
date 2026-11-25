@@ -349,10 +349,9 @@ pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
         walker.step(dt / steps as f64, 1);
         w.step(dt / steps as f64);
     }
-    // A new person steps off the kerb once this one is across, or once a person knocked
-    // down (with the brakes failed) has come to rest, so the aftermath shows for a moment.
-    let at_rest = walker.qd[..3].iter().all(|v| v.abs() < 0.1);
-    if walker.q[0] > KERB + 13.0 || (walker.q[1] < 0.6 && at_rest) {
+    // A new person steps off the kerb once this one is across. One knocked down (with the
+    // brakes failed) gets up and walks on; if still down after 40 s, a new one comes.
+    if walker.q[0] > KERB + 13.0 || (walker.time > 40.0 && robot::hip_height(walker) < 0.6) {
         *walker = walker_at_kerb();
     }
 }

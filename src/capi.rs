@@ -7,7 +7,7 @@
 
 use crate::env::{Env, Task};
 
-/// Creates an environment. `task`: 0 balance, 1 hop, 2 reach, 3 imitate. Returns null for any other value.
+/// Creates an environment. `task`: 0 balance, 1 hop, 2 reach, 3 imitate, 4 get up. Returns null for any other value.
 #[unsafe(no_mangle)]
 pub extern "C" fn ps_env_new(task: u32) -> *mut Env {
     let task = match task {
@@ -15,6 +15,7 @@ pub extern "C" fn ps_env_new(task: u32) -> *mut Env {
         1 => Task::Hop,
         2 => Task::Reach,
         3 => Task::Imitate,
+        4 => Task::GetUp,
         _ => return std::ptr::null_mut(),
     };
     Box::into_raw(Box::new(Env::new(task)))

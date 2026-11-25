@@ -118,8 +118,9 @@ pub struct Robot {
     /// Whatever the controller needs to remember between calls. The walker keeps its
     /// stance leg (0 or 1), when the current step began, how many steps it has taken, when
     /// it began reaching for the ground with the swing foot (infinite until it does), and
-    /// whether it is standing still (1) rather than walking (0).
-    pub memory: [f64; 5],
+    /// whether it is standing still (1) rather than walking (0), and when it began getting
+    /// up after a fall (0 when it is not).
+    pub memory: [f64; 6],
     pub pull: Option<Pull>,
     /// Whether the links collide with the floor.
     pub ground: bool,
@@ -155,7 +156,7 @@ impl Robot {
             time: 0.0,
             controller: None,
             target: None,
-            memory: [0.0, 0.0, 0.0, f64::INFINITY, 0.0],
+            memory: [0.0, 0.0, 0.0, f64::INFINITY, 0.0, 0.0],
             pull: None,
             ground: false,
             external: Vec::new(),
@@ -1130,7 +1131,14 @@ pub fn imitate(r: &mut Robot) {
         r.memory[3] = r.time;
     }
     if r.time > landing_start && sole_height(r, &frames, swing + 2) < 0.005 {
-        r.memory = [1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY, 0.0];
+        r.memory = [
+            1.0 - stance_side,
+            r.time,
+            steps + 1.0,
+            f64::INFINITY,
+            0.0,
+            0.0,
+        ];
         return imitate(r);
     }
     let mut refs = reference(phase + m.lead, pace(r)).0;
@@ -1275,7 +1283,7 @@ pub fn start_in_stride(r: &mut Robot, phase: f64) {
     {
         (r.q[joint], r.qd[joint]) = (now[k], rate(k));
     }
-    r.memory = [0.0, r.time - phase * seconds, 0.0, f64::INFINITY, 0.0];
+    r.memory = [0.0, r.time - phase * seconds, 0.0, f64::INFINITY, 0.0, 0.0];
     r.q[1] = 0.0;
     let frames = r.frames(&r.q);
     let low = [stance + 2, swing + 2]
@@ -1340,11 +1348,44 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
 /// The walker's controller with the trained policy correcting it: `imitate`, steered by
 /// `env::walk_policy`.
 pub fn mimic_walk(r: &mut Robot) {
-    use crate::env::{IMITATE_REACH, walk_policy};
-    // Once down, a person stops trying to walk: the muscles let go (joint friction remains),
-    // rather than the policy flailing a body it was never trained to move.
-    if hip_height(r) < 0.6 || r.q[WALKER_TORSO].abs() > 1.0 {
+    use crate::env::{IMITATE_REACH, getup_policy, walk_policy};
+    // Knocked down, a person goes limp until they come to rest, then gets up (the get-up
+    // policy, `env::Task::GetUp`, which practised from such falls and was paid to stay up, so
+    // it also does the standing). Up and asked to walk, they walk on. A get-up that has not
+    // stood for 15 s starts again from rest.
+    let down = hip_height(r) < 0.6 || r.q[WALKER_TORSO].cos() < 0.54;
+    let getting_up = r.memory[5] > 0.0;
+    if getting_up && is_standing(r) {
+        r.memory[5] = r.time;
+    }
+    if getting_up && is_standing(r) && r.command > STOP_BELOW {
+        let turns = (r.q[WALKER_TORSO] / std::f64::consts::TAU).round();
+        r.q[WALKER_TORSO] -= turns * std::f64::consts::TAU; // the same pose, a turn fewer
+        settle(r);
+        let front = r.memory[0];
+        r.memory = [front, r.time, r.memory[2], f64::INFINITY, 1.0, 0.0];
+        return stand(r);
+    }
+    // The controller runs every substep, but the policy chose once per 1/60 s frame in
+    // training, holding its targets between: so it is asked only at the start of a frame.
+    let frame_start = ((r.time * 60.0).round() - r.time * 60.0).abs() < 1e-6;
+    if getting_up && r.time - r.memory[5] < 15.0 {
+        if !frame_start && r.adjust.len() == GETUP_JOINTS.len() {
+            return get_up(r);
+        }
+        r.adjust = getup_policy(&getup_obs(r))
+            .iter()
+            .zip(GETUP_RANGE)
+            .map(|(a, (lo, hi))| lo + (hi - lo) * 0.5 * (a.clamp(-1.0, 1.0) + 1.0))
+            .collect();
+        return get_up(r);
+    }
+    if down || getting_up {
+        r.memory[5] = 0.0;
         r.ctrl.iter_mut().for_each(|c| *c = 0.0);
+        if r.qd.iter().take(4).all(|v| v.abs() < 0.05) {
+            r.memory[5] = r.time; // at rest: get up
+        }
         return;
     }
     if r.memory[4] == 0.0 {
@@ -1354,6 +1395,16 @@ pub fn mimic_walk(r: &mut Robot) {
             .collect();
     }
     imitate(r);
+}
+
+/// The pose to stand in: as the legs are now, but each knee straightened and each foot put
+/// down flat, as people settle out of a stride or up from the floor.
+fn settle(r: &mut Robot) {
+    r.held = r.q.clone();
+    for hip in WALKER_HIPS {
+        r.held[hip + 1] = -0.05;
+        r.held[hip + 2] = -(r.q[WALKER_TORSO] + r.held[hip] + r.held[hip + 1]);
+    }
 }
 
 /// Switches the walker between walking and standing still as its command asks.
@@ -1372,19 +1423,13 @@ fn stop_or_go(r: &mut Robot) {
         .fold(f64::NEG_INFINITY, f64::max);
     let capture = com.x + com_vel.x * (0.9f64 / 9.81).sqrt();
     if r.memory[4] == 0.0 && r.command < STOP_BELOW && both_down && toe > capture {
-        // Stand as this footfall left the legs, but each knee straightened and each foot
-        // put down flat, as people settle out of a stride.
         r.memory[4] = 1.0;
-        r.held = r.q.clone();
-        for hip in WALKER_HIPS {
-            r.held[hip + 1] = -0.05;
-            r.held[hip + 2] = -(r.q[WALKER_TORSO] + r.held[hip] + r.held[hip + 1]);
-        }
+        settle(r);
     } else if r.memory[4] == 1.0 && r.command > STOP_BELOW {
         // Step off with the rear foot: the front one is the stance foot, which puts the
         // walker in the capture's pose at a heel strike, the start of a step.
         let front = (frames[WALKER_HIPS[1] + 2].0.x > frames[WALKER_HIPS[0] + 2].0.x) as usize;
-        r.memory = [front as f64, r.time, r.memory[2], f64::INFINITY, 0.0];
+        r.memory = [front as f64, r.time, r.memory[2], f64::INFINITY, 0.0, 0.0];
     }
 }
 
@@ -1465,3 +1510,90 @@ fn stand(r: &mut Robot) {
 /// The ankle strategy's gains: ankle angle per metre the centre of mass is beyond the middle
 /// of the feet, and per m/s it moves (negative: toe down, which tips the shins back).
 const STAND_LEAN: (f64, f64) = (-4.0, -1.0);
+
+/// The joints the get-up policy moves (hips, knees and ankles, then shoulders and elbows),
+/// and the range of target angles it can ask of each (rad).
+pub const GETUP_JOINTS: [usize; 10] = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+pub const GETUP_RANGE: [(f64, f64); 10] = [
+    (-1.2, 1.8),
+    (-2.4, 0.0),
+    (-0.8, 0.8),
+    (-1.2, 1.8),
+    (-2.4, 0.0),
+    (-0.8, 0.8),
+    (-2.5, 2.5),
+    (0.0, 2.4),
+    (-2.5, 2.5),
+    (0.0, 2.4),
+];
+
+/// Getting up: every joint a stiff spring-damper toward the target angle in `Robot::adjust`
+/// (in `GETUP_JOINTS` order), which a learned policy sets (`env::Task::GetUp`).
+pub fn get_up(r: &mut Robot) {
+    for (k, &joint) in GETUP_JOINTS.iter().enumerate() {
+        let want = r.adjust.get(k).copied().unwrap_or(r.q[joint]);
+        let kp = if joint >= SHOULDERS[0] { 80.0 } else { 600.0 };
+        let torque = kp * (want - r.q[joint]) - 0.1 * kp * r.qd[joint];
+        r.ctrl[joint] = torque / r.links[joint].gear;
+    }
+}
+
+/// What the get-up policy sees: torso pitch (as sine and cosine, as a fallen body can turn
+/// over more than once) and its rate, hip height above the floor, the body's speed, each
+/// joint's angle and rate, and how high each foot is. Rates scaled by 0.1.
+pub fn getup_obs(r: &Robot) -> Vec<f64> {
+    let frames = r.frames(&r.q);
+    let pitch = r.q[WALKER_TORSO];
+    [
+        pitch.sin(),
+        pitch.cos(),
+        0.1 * r.qd[WALKER_TORSO],
+        hip_height(r),
+        0.1 * r.qd[0],
+        0.1 * r.qd[1],
+    ]
+    .into_iter()
+    .chain(GETUP_JOINTS.iter().map(|&j| r.q[j]))
+    .chain(GETUP_JOINTS.iter().map(|&j| 0.1 * r.qd[j]))
+    .chain(
+        WALKER_HIPS
+            .iter()
+            .map(|&hip| sole_height(r, &frames, hip + 2)),
+    )
+    .collect()
+}
+
+/// Up and steady on both feet: hip at standing height, torso upright, soles down.
+pub fn is_standing(r: &Robot) -> bool {
+    let frames = r.frames(&r.q);
+    hip_height(r) > 0.85
+        && r.q[WALKER_TORSO].cos() > 0.95
+        && WALKER_HIPS
+            .iter()
+            .all(|&hip| sole_height(r, &frames, hip + 2) < 0.01)
+}
+
+/// Poses of the walker lying where a shove left it: 24 falls, shoved forward or back at
+/// different strengths and moments, each left to come to rest. Get-up practice starts here.
+pub fn fallen_poses() -> &'static [Vec<f64>] {
+    static POSES: std::sync::OnceLock<Vec<Vec<f64>>> = std::sync::OnceLock::new();
+    POSES.get_or_init(|| {
+        let mut rng = crate::env::Rng::new(1);
+        (0..24)
+            .map(|k| {
+                let mut r = walker();
+                let shove = if k % 2 == 0 { 1.0 } else { -1.0 } * (0.5 + 0.5 * rng.uniform().abs());
+                let at = 60 + (rng.uniform().abs() * 60.0) as usize;
+                for frame in 0..300 {
+                    r.pull = (at..at + 10).contains(&frame).then(|| Pull {
+                        link: WALKER_TORSO,
+                        local: Vec3::Y * 0.3,
+                        target: Vec3::new(r.q[0] + shove, r.q[1] + 0.3, 0.0),
+                    });
+                    r.step(1.0 / 60.0, 16);
+                }
+                r.q
+            })
+            .collect()
+    })
+}

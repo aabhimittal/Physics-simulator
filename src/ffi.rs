@@ -284,7 +284,8 @@ pub extern "C" fn car(field: u32) -> f64 {
 }
 
 /// Walker readout: `[average speed m/s, steps taken, steps per second, pace asked for m/s,
-/// standing (1) or walking (0), speed now m/s, sideways position m]`.
+/// standing (1) or walking (0), speed now m/s, sideways position m, then (7) getting up (2),
+/// down (1) or on its feet (0)]`.
 #[unsafe(no_mangle)]
 pub extern "C" fn walker(field: u32) -> f64 {
     with(|s| {
@@ -297,6 +298,9 @@ pub extern "C" fn walker(field: u32) -> f64 {
                 3 => r.command,
                 4 => r.memory[4],
                 5 => r.qd[0],
+                // 2 getting up, 1 down (limp), 0 on its feet.
+                7 if r.memory[5] > 0.0 => 2.0,
+                7 => (robot::hip_height(r) < 0.6) as u8 as f64,
                 _ => r.q[2],
             }
         })

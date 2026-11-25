@@ -274,20 +274,59 @@ fn walker_recovers_from_shoves_both_ways() {
 }
 
 #[test]
-fn knocked_down_walker_comes_to_rest() {
-    // A hard shove knocks it over. The fallen body must stop, not slide off faster and
-    // faster (stiff joint dampers on the light feet once made it gain momentum from nowhere).
-    let mut r = robot::walker();
-    for frame in 0..(12.0 / DT) as usize {
-        r.pull = (240..249).contains(&frame).then(|| Pull {
-            link: TORSO,
-            local: dvec3(0.0, 0.3, 0.0),
-            target: dvec3(r.q[0] + 1.0, r.q[1] + 0.3, 0.0),
-        });
-        r.step(DT, 16);
-    }
-    assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
-    assert!(r.qd[0].abs() < 0.2, "still sliding at {} m/s", r.qd[0]);
+fn knocked_down_walker_gets_up_and_walks_on() {
+    // Hard shoves, either way, knock it over mid-walk (the harder ones throw it off its
+    // feet). It goes limp, comes to rest (stiff joint dampers on the light feet once made a
+    // fallen body slide off faster and faster, and the get-up only starts from rest), gets
+    // up with the trained policy, and walks on. Where a fall leaves it differs chaotically
+    // with the shove, and from some it takes a second attempt, so 3 of 4 must make it.
+    let walked_on = [1.0, -1.0, 1.5, -1.5]
+        .iter()
+        .filter(|&&shove| {
+            let mut r = robot::walker();
+            let (mut fell, mut x20) = (false, 0.0);
+            for frame in 0..(30.0 / DT) as usize {
+                r.pull = (240..250).contains(&frame).then(|| Pull {
+                    link: TORSO,
+                    local: dvec3(0.0, 0.3, 0.0),
+                    target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
+                });
+                r.step(DT, 16);
+                assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
+                fell |= robot::hip_height(&r) < 0.5;
+                if frame == (20.0 / DT) as usize {
+                    x20 = r.q[0];
+                }
+            }
+            println!(
+                "shove {shove}: fell {fell}, walked {:.1} m in the last 10 s",
+                r.q[0] - x20
+            );
+            fell && r.q[0] - x20 > 8.0
+        })
+        .count();
+    assert!(walked_on >= 3, "only {walked_on} of 4 got up and walked on");
+}
+
+#[test]
+fn getup_policy_stands_from_most_falls() {
+    // Each practised fall, from rest, under the trained get-up policy for 10 s.
+    let standing = robot::fallen_poses()
+        .iter()
+        .filter(|pose| {
+            let mut r = robot::walker();
+            r.q = pose.to_vec();
+            r.qd.iter_mut().for_each(|v| *v = 0.0);
+            r.memory[5] = 1e-9; // already getting up
+            r.command = 0.0; // and, once up, asked to stand
+            for _ in 0..(10.0 / DT) as usize {
+                r.step(DT, 16);
+            }
+            robot::is_standing(&r)
+        })
+        .count();
+    println!("standing after 10 s from {standing} of 24 falls");
+    assert!(standing >= 20, "stood up from only {standing} of 24 falls");
 }
 
 /// Gait measurements over seconds 5 to 15 of walking: speed, cadence, the most the knee of
