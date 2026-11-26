@@ -24,6 +24,10 @@ pub enum Task {
     /// the speed asked for, which changes now and then between 0.6 and 1.6 m/s; a quarter of
     /// episodes start standing still.
     Imitate,
+    /// Walker, fallen: get up. The policy sets a target angle for each joint it moves
+    /// (`robot::GETUP_JOINTS`); observation `robot::getup_obs`; reward = hip height times
+    /// uprightness, plus a bonus for standing on both feet.
+    GetUp,
 }
 
 /// Corrections the imitation policy makes: torso lean, swing hip, knee and ankle, stance
@@ -99,6 +103,7 @@ impl Env {
     pub fn action_size(&self) -> usize {
         match self.task {
             Task::Imitate => IMITATE_ACTIONS,
+            Task::GetUp => robot::GETUP_JOINTS.len(),
             _ => self.motors().count(),
         }
     }
@@ -110,7 +115,7 @@ impl Env {
             Task::Balance => robot::cart_pole(),
             Task::Hop => robot::hopper(),
             Task::Reach => robot::arm(),
-            Task::Imitate => robot::walker(),
+            Task::Imitate | Task::GetUp => robot::walker(),
         };
         // The agent drives the motors, not the built-in controller; except when imitating,
         // where it corrects the controller.
@@ -118,6 +123,14 @@ impl Env {
         match self.task {
             Task::Balance => r.q[1] = 0.0, // upright
             Task::Hop => r.q[1] = 1.0,     // standing on the ground
+            Task::GetUp => {
+                // One of the falls, jostled a little, at rest.
+                let poses = robot::fallen_poses();
+                r.q = poses[(0.5 * (rng.uniform() + 1.0) * poses.len() as f64) as usize].clone();
+                r.qd.iter_mut().for_each(|v| *v = 0.0);
+                r.controller = Some(robot::get_up);
+                r.adjust = robot::GETUP_JOINTS.iter().map(|&j| r.q[j]).collect();
+            }
             Task::Imitate => {
                 // Start anywhere in the stride, as DeepMimic does, so every part gets practised.
                 r.controller = Some(robot::imitate);
@@ -173,6 +186,7 @@ impl Env {
             // The hopper's x position is left out, so a policy cannot depend on where it is.
             Task::Hop => r.q[1..].iter().chain(&r.qd).copied().collect(),
             Task::Imitate => robot::imitation_obs(r),
+            Task::GetUp => robot::getup_obs(r),
             Task::Reach => {
                 let offset = r.target.unwrap() - self.tip();
                 r.q.iter()
@@ -198,7 +212,13 @@ impl Env {
         );
         // NaN would poison the whole state; treat it as no command.
         let clean = |a: f64| if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) };
-        if self.task == Task::Imitate {
+        if self.task == Task::GetUp {
+            self.robot.adjust = action
+                .iter()
+                .zip(robot::GETUP_RANGE)
+                .map(|(&a, (lo, hi))| lo + (hi - lo) * 0.5 * (clean(a) + 1.0))
+                .collect();
+        } else if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
             // About every three seconds, asked for a new pace, which the request ramps to at
             // 0.8 m/s², about as quickly as people change pace: so it learns to speed up, slow
@@ -254,6 +274,12 @@ impl Env {
                 )
             }
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
+            Task::GetUp => {
+                let height = (robot::hip_height(r) / 0.9).clamp(0.0, 1.0);
+                let upright = 0.5 * (1.0 + r.q[robot::WALKER_TORSO].cos());
+                let standing = robot::is_standing(r) as u8 as f64;
+                (height * upright + standing, false)
+            }
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
                 // Standing still holds its pose by itself: only stillness counts then.
@@ -357,6 +383,16 @@ pub fn hop_policy(obs: &[f64]) -> Vec<f64> {
 /// imitation controller's targets (`Task::Imitate`), same network shape as the hopper's.
 pub fn walk_policy(obs: &[f64]) -> Vec<f64> {
     network(include_bytes!("walk_policy.bin"), obs, IMITATE_ACTIONS)
+}
+
+/// The get-up policy trained by `python/train_hopper.py getup` (`Task::GetUp`): a target
+/// angle for each of `robot::GETUP_JOINTS`, as an action in [-1, 1].
+pub fn getup_policy(obs: &[f64]) -> Vec<f64> {
+    network(
+        include_bytes!("getup_policy.bin"),
+        obs,
+        robot::GETUP_JOINTS.len(),
+    )
 }
 
 /// Runs a network stored as raw little-endian f32: for each layer its weights (one row per

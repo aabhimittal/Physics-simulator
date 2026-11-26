@@ -17,7 +17,9 @@ pub const CAR_SCENE: u32 = 12;
 pub const WALK_SCENE: u32 = 13;
 /// The person walking across the car's road; see `crossing`.
 pub const CROSSING_SCENE: u32 = 14;
-pub const SCENE_COUNT: u32 = 15;
+/// The walking person in three dimensions, `walker3d::walker3d`.
+pub const WALK3D_SCENE: u32 = 15;
+pub const SCENE_COUNT: u32 = 16;
 
 /// What a scene id runs. The web page derives the same from its own scene list.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -30,6 +32,7 @@ pub enum Kind {
     Car,
     Walking,
     Crossing,
+    Walking3d,
 }
 
 pub fn kind(id: u32) -> Option<Kind> {
@@ -41,6 +44,7 @@ pub fn kind(id: u32) -> Option<Kind> {
         CAR_SCENE => Kind::Car,
         WALK_SCENE => Kind::Walking,
         CROSSING_SCENE => Kind::Crossing,
+        WALK3D_SCENE => Kind::Walking3d,
         _ => return None,
     })
 }
@@ -345,10 +349,9 @@ pub fn step_crossing(w: &mut World, walker: &mut Robot, dt: f64) {
         walker.step(dt / steps as f64, 1);
         w.step(dt / steps as f64);
     }
-    // A new person steps off the kerb once this one is across, or once a person knocked
-    // down (with the brakes failed) has come to rest, so the aftermath shows for a moment.
-    let at_rest = walker.qd[..3].iter().all(|v| v.abs() < 0.1);
-    if walker.q[0] > KERB + 13.0 || (walker.q[1] < 0.6 && at_rest) {
+    // A new person steps off the kerb once this one is across. One knocked down (with the
+    // brakes failed) gets up and walks on; if still down after 40 s, a new one comes.
+    if walker.q[0] > KERB + 13.0 || (walker.time > 40.0 && robot::hip_height(walker) < 0.6) {
         *walker = walker_at_kerb();
     }
 }

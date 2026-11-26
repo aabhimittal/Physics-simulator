@@ -274,20 +274,59 @@ fn walker_recovers_from_shoves_both_ways() {
 }
 
 #[test]
-fn knocked_down_walker_comes_to_rest() {
-    // A hard shove knocks it over. The fallen body must stop, not slide off faster and
-    // faster (stiff joint dampers on the light feet once made it gain momentum from nowhere).
-    let mut r = robot::walker();
-    for frame in 0..(12.0 / DT) as usize {
-        r.pull = (240..249).contains(&frame).then(|| Pull {
-            link: TORSO,
-            local: dvec3(0.0, 0.3, 0.0),
-            target: dvec3(r.q[0] + 1.0, r.q[1] + 0.3, 0.0),
-        });
-        r.step(DT, 16);
-    }
-    assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
-    assert!(r.qd[0].abs() < 0.2, "still sliding at {} m/s", r.qd[0]);
+fn knocked_down_walker_gets_up_and_walks_on() {
+    // Hard shoves, either way, knock it over mid-walk (the harder ones throw it off its
+    // feet). It goes limp, comes to rest (stiff joint dampers on the light feet once made a
+    // fallen body slide off faster and faster, and the get-up only starts from rest), gets
+    // up with the trained policy, and walks on. Where a fall leaves it differs chaotically
+    // with the shove, and from some it takes a second attempt, so 3 of 4 must make it.
+    let walked_on = [1.0, -1.0, 1.5, -1.5]
+        .iter()
+        .filter(|&&shove| {
+            let mut r = robot::walker();
+            let (mut fell, mut x20) = (false, 0.0);
+            for frame in 0..(30.0 / DT) as usize {
+                r.pull = (240..250).contains(&frame).then(|| Pull {
+                    link: TORSO,
+                    local: dvec3(0.0, 0.3, 0.0),
+                    target: dvec3(r.q[0] + shove, r.q[1] + 0.3, 0.0),
+                });
+                r.step(DT, 16);
+                assert!(r.q.iter().chain(&r.qd).all(|v| v.is_finite()));
+                fell |= robot::hip_height(&r) < 0.5;
+                if frame == (20.0 / DT) as usize {
+                    x20 = r.q[0];
+                }
+            }
+            println!(
+                "shove {shove}: fell {fell}, walked {:.1} m in the last 10 s",
+                r.q[0] - x20
+            );
+            fell && r.q[0] - x20 > 8.0
+        })
+        .count();
+    assert!(walked_on >= 3, "only {walked_on} of 4 got up and walked on");
+}
+
+#[test]
+fn getup_policy_stands_from_most_falls() {
+    // Each practised fall, from rest, under the trained get-up policy for 10 s.
+    let standing = robot::fallen_poses()
+        .iter()
+        .filter(|pose| {
+            let mut r = robot::walker();
+            r.q = pose.to_vec();
+            r.qd.iter_mut().for_each(|v| *v = 0.0);
+            r.memory[5] = 1e-9; // already getting up
+            r.command = 0.0; // and, once up, asked to stand
+            for _ in 0..(10.0 / DT) as usize {
+                r.step(DT, 16);
+            }
+            robot::is_standing(&r)
+        })
+        .count();
+    println!("standing after 10 s from {standing} of 24 falls");
+    assert!(standing >= 20, "stood up from only {standing} of 24 falls");
 }
 
 /// Gait measurements over seconds 5 to 15 of walking: speed, cadence, the most the knee of
@@ -597,4 +636,45 @@ fn walker_crosses_uneven_ground() {
         }
         assert!(r.q[0] > 15.0, "{name}: only {:.1} m in 15 s", r.q[0]);
     }
+}
+
+#[test]
+fn walker_in_3d_walks_and_catches_itself_sideways() {
+    // The 3D body, free to fall sideways and turn, under its hand-written 3D SIMBICON: it
+    // walks 12 s, and sideways shoves (about 120 and 200 N for 0.2 s, either way, at four
+    // moments of the stride) mostly make it step out and recover. Mostly: this controller
+    // works in a narrow band, so the test asks for 10 of 16, not all.
+    use physics_simulator::walker3d::{self, ROLL, TORSO};
+    let walk = |shove: f64, at: usize| {
+        let mut r = walker3d::walker3d();
+        for frame in 0..(12.0 / DT) as usize {
+            r.pull = (shove != 0.0 && (at..at + 12).contains(&frame)).then(|| Pull {
+                link: TORSO,
+                local: dvec3(0.0, 0.3, 0.0),
+                target: dvec3(r.q[0], r.q[1] + 0.3, r.q[2] + shove),
+            });
+            r.step(DT, 16);
+            if r.q[1] < 0.7 || r.q[TORSO].abs() > 0.6 || r.q[ROLL].abs() > 0.6 {
+                return None;
+            }
+        }
+        Some((r.q[0], r.q[2]))
+    };
+    // Starting from standing tips it sideways at first; it settles, having drifted about 1.3 m.
+    let (distance, drift) = walk(0.0, 0).expect("fell without being shoved");
+    assert!(distance > 8.0, "only {distance:.1} m in 12 s");
+    assert!(drift.abs() < 1.8, "drifted {drift:.1} m sideways");
+    let shoves = [0.03, -0.03, 0.05, -0.05];
+    let survived = shoves
+        .iter()
+        .flat_map(|&s| [300, 315, 330, 345].map(|at| walk(s, at).is_some()))
+        .filter(|&ok| ok)
+        .count();
+    println!(
+        "{distance:.1} m in 12 s, {drift:.1} m sideways; survived {survived} of 16 sideways shoves"
+    );
+    assert!(
+        survived >= 10,
+        "survived only {survived} of 16 sideways shoves"
+    );
 }

@@ -223,8 +223,8 @@ in dropped kerbs, 1.25 m ramps of 8% (about the steepest UK guidance allows), an
 scene's course keeps to ramps of 6% and steps of 4 cm. Letting the policy see the ground
 ahead, and training it on rough terrain, is the upgrade for real kerbs and stairs.
 
-It lands heel first, steps evenly, and once knocked down stops trying to walk (the muscles
-let go). To retrain: `python3 python/train_hopper.py imitate 2500000 0`, then copy
+It lands heel first, steps evenly, and once knocked down goes limp, then gets up (below).
+To retrain: `python3 python/train_hopper.py imitate 2500000 0`, then copy
 `ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; trust the tests,
 not the training log. Limits: it walks in a plane (no hip sway or pelvis twist) and cannot
 turn; the brisk end is capped at 1.6 m/s (asked for the captured brisk walk's 1.9 m/s, it
@@ -233,6 +233,59 @@ withstands a nudge (about 120 N) but a hard shove topples it, where a person wou
 
 In the browser the links are drawn as a person (tapered limbs, head, hands, shoes,
 clothes); the physics underneath is the same set of boxes.
+
+### Getting up
+
+Knocked down, the walker goes limp until it comes to rest, as people do, then a second
+learned policy (`env::Task::GetUp`, `src/getup_policy.bin`) gets it up. It sets target
+angles for the hips, knees, ankles, shoulders and elbows, which stiff joint springs follow.
+It practised from 24 falls (`robot::fallen_poses`: the walker shoved forward or back at
+different strengths and moments, then left to come to rest), with a reward for hip height
+times uprightness, plus one for each step standing on both feet. That last part paid it to
+stay up, so it also does the standing afterwards. Asked to walk, it hands over to the
+walking controller, which settles the legs straight and steps off.
+
+`getup_policy_stands_from_most_falls` checks that it is standing 10 s after 23 of the 24
+falls. `knocked_down_walker_gets_up_and_walks_on` knocks it over mid-walk four ways, the
+harder shoves throwing it off its feet, and asks that at least three get up and walk on;
+all four do, up within 5 to 16 s. A get-up that has not stood for 15 s goes limp and starts
+again.
+
+Training it (`python3 python/train_hopper.py getup 4000000 0`, about 2 hours on 2 CPU
+threads) taught a lesson. The training log ended at a return of 675, well short of the
+~1100 a perfect run would score, which looked like a policy half done. In the simulator it
+stood up from 23 of 24 falls. The return was low because it takes 1 to 4 s to get up and
+earns little while lying down. And the first in-game tests failed for a reason that had
+nothing to do with the policy: the controller runs on every one of the 16 substeps per
+frame, so the policy was being asked for new targets 960 times a second, where in training
+it chose once a frame. Asked only at the start of each frame, it went from 5 of 24 to 23 of
+24. (The walking policy is still asked every substep, as its tests were written with, and
+it walks well that way. Gating it too changed which falls the get-up test saw, without
+showing an improvement, so it was left alone.)
+
+Limits: it gets up its own way, not a person's: from a fall onto its back it usually rolls
+over backwards, legs over its head, and some falls end with it shuffling along on its seat
+for several seconds before it rises. Training it to match motion-captured get-ups, as the
+walking does, is the fix. It practised only falls forward or back, in the plane.
+It may take two attempts.
+
+### Walking in 3D
+
+`src/walker3d.rs`. The same body with the plane taken away: 22 joints, the torso free to
+roll and turn, hips that also swing out and twist, ankles that also roll. Its controller is
+written by hand, not learned: SIMBICON (Yin, Loken and van de Panne, 2007) in both
+directions. Forward, the swing leg lands further ahead the further and faster the body is
+ahead of the stance foot, as in the planar walker. Sideways, the same rule with its own two
+gains puts the swing foot out under a body that is tipping that way, which is how people
+catch themselves when shoved. The stance hip holds the torso level and facing ahead, and
+each foot rolls to lie flat.
+
+`walker_in_3d_walks_and_catches_itself_sideways` walks it 12 s (10.7 m) and shoves it
+sideways (about 120 and 200 N for 0.2 s) at four moments of the stride: it recovers from 12
+of 16. Limits, honestly: the sideways gains work in a narrow band (their grid neighbours
+fall); starting from standing tips it sideways for the first few seconds, so it drifts about
+1.3 m before settling into a straight 1.3 m/s walk; it cannot turn on purpose; and it does
+not use the motion-capture policy. Training that policy in 3D is the upgrade.
 
 ## Car
 
@@ -338,7 +391,7 @@ brake pedal doing nothing, the car placed 145° back round the road at 50 km/h, 
 off that the person judges it safe to step out. The driver sees them and lifts off, the
 person sees it coming and hurries, but coasting cannot stop it: it strikes them at about
 45 km/h and slows as it passes them momentum. The timing is staged (starts from 130° to
-160° back all lead to an impact); what follows is not. A person knocked down lies still for a moment before the next one steps off the kerb.
+160° back all lead to an impact); what follows is not. A person knocked down lies still, then gets up and finishes crossing (a new one comes if they are still down after 40 s).
 
 Limits: the tyre is a swept sphere, and a touch further to the side than its 11 cm half
 tread counts as beside the tyre, not under it, so the wheel looks straight down instead (a

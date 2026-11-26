@@ -17,6 +17,7 @@ pub mod mocap_walk;
 pub mod robot;
 pub mod scenes;
 pub mod vehicle;
+pub mod walker3d;
 
 use collide::Contact;
 pub use collide::{Hit, penetration, raycast, sphere_cast};
