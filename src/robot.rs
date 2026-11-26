@@ -1617,6 +1617,15 @@ pub fn getup_style(r: &Robot) -> f64 {
     (-2.0 * nearest / 11.0).exp()
 }
 
+/// A foot more than 30 cm above its hip: legs thrown over the head, as in a backward roll,
+/// which people getting up do not do.
+pub fn legs_over_hips(r: &Robot) -> bool {
+    let frames = r.frames(&r.q);
+    WALKER_HIPS
+        .iter()
+        .any(|&hip| frames[hip + 2].0.y > frames[hip].0.y + 0.3)
+}
+
 /// Up and steady on both feet: hip at standing height, torso upright, soles down.
 pub fn is_standing(r: &Robot) -> bool {
     let frames = r.frames(&r.q);

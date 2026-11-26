@@ -367,12 +367,15 @@ impl Env {
             Task::GetUp => {
                 // Rising pays, more so the way a person rises (DeepMimic's pose reward, against
                 // the nearest captured pose instead of one clip's, as falls start anywhere);
-                // lying in a captured pose pays nothing. Standing pays in full.
+                // lying in a captured pose pays nothing. Standing pays in full. Rolling over
+                // backwards, legs over the head, costs more than the time it saves: the style
+                // term alone was too faint beside standing to stop it.
                 let height = (robot::hip_height(r) / 0.9).clamp(0.0, 1.0);
                 let upright = 0.5 * (1.0 + r.q[robot::WALKER_TORSO].cos());
                 let style = 0.3 + 0.7 * robot::getup_style(r);
                 let standing = robot::is_standing(r) as u8 as f64;
-                (height * upright * style + standing, false)
+                let roll = 2.0 * robot::legs_over_hips(r) as u8 as f64;
+                (height * upright * style + standing - roll, false)
             }
             Task::Walk3d => {
                 let planar = r.shadow.as_ref().unwrap();
