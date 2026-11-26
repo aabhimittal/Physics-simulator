@@ -1,6 +1,7 @@
 """Turns CMU motion-capture walks into the walker's reference gaits, src/mocap_walk.rs.
 
     python3 python/mocap.py 07.asf 07_04.amc 07_01.amc 07_12.amc > src/mocap_walk.rs
+    python3 python/mocap.py --getup 140.asf 140_01.amc 140_02.amc 140_08.amc 140_09.amc > src/mocap_getup.rs
 
 The files come from the CMU Graphics Lab Motion Capture Database
 (http://mocap.cs.cmu.edu/subjects/07/), which may be copied, modified or
@@ -98,6 +99,37 @@ def positions(bones, children, frame):
     return out
 
 
+def angles(p, s, plane, foot_rest):
+    """Side "l" or "r" of pose `p`, in the walker's conventions in `plane` (a function giving a
+    vector's forward and up parts): torso pitch (positive leaning back), thigh from straight
+    down in the world (positive forward), knee, ankle, upper arm from straight down in the
+    world, elbow."""
+
+    def hanging(a, b):  # angle of limb a->b from straight down, positive forward
+        x, y = plane(b - a)
+        return np.arctan2(x, -y)
+
+    def lying(a, b):  # angle of a->b above forward-horizontal
+        x, y = plane(b - a)
+        return np.arctan2(y, x)
+
+    x, y = plane(p["thorax"] - p["root"])
+    torso = -np.arctan2(x, y)
+    thigh = hanging(p[s + "hipjoint"], p[s + "femur"])
+    shin = hanging(p[s + "femur"], p[s + "tibia"])
+    foot = lying(p[s + "tibia"], p[s + "foot"]) - foot_rest
+    upper = hanging(p[s + "clavicle"], p[s + "humerus"])
+    fore = hanging(p[s + "humerus"], p[s + "radius"])
+    return torso, thigh, shin - thigh, foot - shin, upper, fore - upper
+
+
+def rest_foot(bones, children, plane):
+    """The foot's rest direction (ankle to toe) with the shin vertical: the walker's ankle 0."""
+    rest = positions(bones, children, {"root": [0.0] * 6})
+    x, y = plane(rest["lfoot"] - rest["ltibia"])
+    return np.arctan2(y, x)
+
+
 def clip(bones, children, amc):
     """One averaged step of the walk in `amc`: (speed m/s, step seconds, rows of 11 angles)."""
     frames = [positions(bones, children, f) for f in read_amc(amc)]
@@ -108,30 +140,9 @@ def clip(bones, children, amc):
     up = np.array([0.0, 1.0, 0.0])
     plane = lambda v: (v @ fwd, v @ up)  # noqa: E731
 
-    def hanging(a, b):  # angle of limb a->b from straight down, positive forward
-        x, y = plane(b - a)
-        return np.arctan2(x, -y)
-
-    def lying(a, b):  # angle of a->b above forward-horizontal
-        x, y = plane(b - a)
-        return np.arctan2(y, x)
-
-    # The foot's rest direction (ankle to toe), with the shin vertical, is the walker's ankle 0.
-    rest = positions(bones, children, {"root": [0.0] * 6})
-    foot_rest = lying(rest["ltibia"], rest["lfoot"])
-
-    def angles(p, s):  # side "l" or "r": torso pitch, hip, knee, ankle, shoulder, elbow
-        x, y = plane(p["thorax"] - p["root"])
-        torso = -np.arctan2(x, y)  # positive leaning back
-        thigh = hanging(p[s + "hipjoint"], p[s + "femur"])
-        shin = hanging(p[s + "femur"], p[s + "tibia"])
-        foot = lying(p[s + "tibia"], p[s + "foot"]) - foot_rest
-        upper = hanging(p[s + "clavicle"], p[s + "humerus"])
-        fore = hanging(p[s + "humerus"], p[s + "radius"])
-        return torso, thigh, shin - thigh, foot - shin, upper, fore - upper
-
-    left = np.array([angles(p, "l") for p in frames])
-    right = np.array([angles(p, "r") for p in frames])
+    foot_rest = rest_foot(bones, children, plane)
+    left = np.array([angles(p, "l", plane, foot_rest) for p in frames])
+    right = np.array([angles(p, "r", plane, foot_rest) for p in frames])
 
     # Heel strikes: where each ankle, swinging forward, comes almost to a stop (a fifth of its
     # fastest), which holds even where the capture's floor is not quite level.
@@ -175,7 +186,78 @@ def clip(bones, children, amc):
     return speed, step_seconds, rows
 
 
+def getup(bones, children, amc):
+    """Every fourth frame (30 Hz) of a get-up in `amc`, up to where the hips are highest (the
+    person is still bent there, in a ready crouch, not standing tall), leaving out frames with a
+    leg or the torso mostly out of the plane (a leg splayed sideways projects to a short stub
+    whose angle means nothing):
+    torso pitch, then each leg's thigh, knee and ankle, then each arm's upper arm and elbow,
+    both sides kept (a get-up is not symmetric). The plane is the one the person faces once
+    up (these get-ups turn less than 20 degrees on the way). Also left out: frames the capture got
+    physically wrong (a joint through the floor)."""
+    frames = [positions(bones, children, f) for f in read_amc(amc)]
+    # Up is where the hips are highest; after it the person settles into a ready crouch.
+    frames = frames[: 1 + int(np.argmax([p["root"][1] for p in frames]))]
+    up = np.array([0.0, 1.0, 0.0])
+    end = frames[-1]
+    right = end["rhipjoint"] - end["lhipjoint"]
+    fwd = np.cross(up, right)
+    fwd[1] = 0.0
+    fwd /= np.linalg.norm(fwd)
+    if (end["lfoot"] - end["ltibia"]) @ fwd < 0:  # toes point the way the person faces
+        fwd = -fwd
+    plane = lambda v: (v @ fwd, v @ up)  # noqa: E731
+    foot_rest = rest_foot(bones, children, plane)
+    def in_plane(a, b):  # how much of limb a->b lies in the plane: a sideways limb's angle is noise
+        v = b - a
+        return np.hypot(*plane(v)) / np.linalg.norm(v)
+
+    limbs = [("root", "thorax")] + [(s + a, s + b) for s in "lr" for a, b in [("hipjoint", "femur"), ("femur", "tibia")]]
+    # Lying down hides markers against the floor and the capture's solver guesses, sometimes
+    # putting a knee through it: leave out frames with any joint 5 cm below the floor the
+    # person stands on at the end.
+    floor = min(end["lfoot"][1], end["rfoot"][1]) - 0.05 * 0.45 / 0.0254
+    joints = {j for limb in limbs for j in limb} | {"lfoot", "rfoot", "head"}
+    rows, dropped = [], 0
+    for p in frames[::4]:
+        if min(in_plane(p[a], p[b]) for a, b in limbs) < 0.6 or min(p[j][1] for j in joints) < floor:
+            dropped += 1
+            continue
+        torso, *left = angles(p, "l", plane, foot_rest)
+        _, *right_ = angles(p, "r", plane, foot_rest)
+        rows.append([torso, *left[:3], *right_[:3], *left[3:], *right_[3:]])
+    rows = np.array(rows)
+    # Torso pitch can pass through ±π (face down to face up); keep it continuous.
+    rows[:, 0] = np.unwrap(rows[:, 0])
+    print(f"// {amc}: {len(rows)} poses ({dropped} dropped: a leg or the torso mostly out of the "
+          f"plane, or a joint through the floor), from torso {rows[0, 0]:.2f} to {rows[-1, 0]:.2f}",
+          file=sys.stderr)
+    assert abs(rows[0, 0]) > 1.0, "does not start lying down"
+    return rows
+
+
+def main_getup(asf, amcs):
+    bones, children = read_asf(asf)
+    rows = np.concatenate([getup(bones, children, amc) for amc in amcs])
+    names = " ".join(a.rsplit("/", 1)[-1].removesuffix(".amc") for a in amcs)
+    print("//! Get-up poses from motion capture, written by python/mocap.py --getup. Do not edit.")
+    print(f"//! CMU Graphics Lab Motion Capture Database, trials {names}: one person getting up")
+    print("//! from lying face down and on their back, at 30 Hz, until the hips are highest (still")
+    print("//! in a ready crouch). Angles in radians, in the walker's joint conventions.")
+    print("#![allow(clippy::approx_constant)] // measured angles, some near π fractions by chance")
+    print()
+    print("/// Per pose: torso pitch (positive leaning back); each leg's thigh from straight down")
+    print("/// in the world, knee and ankle; each arm's upper arm from straight down in the world")
+    print("/// and elbow.")
+    print(f"pub static POSES: [[f64; 11]; {len(rows)}] = [")
+    for row in rows:
+        print("    [" + ", ".join(f"{v:.4f}" for v in row) + "],")
+    print("];")
+
+
 def main():
+    if sys.argv[1] == "--getup":
+        return main_getup(sys.argv[2], sys.argv[3:])
     bones, children = read_asf(sys.argv[1])
     clips = sorted(clip(bones, children, amc) for amc in sys.argv[2:])
     names = " ".join(a.rsplit("/", 1)[-1].removesuffix(".amc") for a in sys.argv[2:])

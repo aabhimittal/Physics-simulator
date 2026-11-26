@@ -5,6 +5,7 @@
 
 use crate::Vec3;
 use crate::robot::{self, ARM_TIP, Robot};
+use crate::walker3d;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Task {
@@ -19,15 +20,24 @@ pub enum Task {
     /// Observation `[four joint angles, four rates, target - tip]`; reward = -distance.
     Reach,
     /// Walker: walk like the motion capture (`robot::imitate`), the policy correcting the
-    /// controller's joint targets. Observation and action are in stance/swing order (see
-    /// `imitation_obs`); reward = how closely the pose matches the capture, plus walking at
-    /// the speed asked for, which changes now and then between 0.6 and 1.6 m/s; a quarter of
-    /// episodes start standing still.
+    /// controller's joint targets. Observation `robot::walk_obs` (in stance/swing order, then
+    /// the floor ahead); action in stance/swing order; reward = how closely the pose matches
+    /// the capture, plus walking at the speed asked for, which changes now and then between
+    /// 0.6 and 1.6 m/s; a quarter of episodes start standing still, and most on a random
+    /// course of slopes and steps (`course`) up to 15% and 15 cm.
     Imitate,
     /// Walker, fallen: get up. The policy sets a target angle for each joint it moves
     /// (`robot::GETUP_JOINTS`); observation `robot::getup_obs`; reward = hip height times
-    /// uprightness, plus a bonus for standing on both feet.
+    /// uprightness times how like a person's get-up the pose is, plus a bonus for standing on
+    /// both feet, less a cost for rolling over backwards. Half the episodes start from a
+    /// fall, half partway through a person's captured get-up (`robot::pose_as_captured`).
     GetUp,
+    /// The 3D walker: walk like the motion capture, as `Imitate`, and keep straight. The
+    /// policy corrects the planar controller's targets as `Imitate` does, and the sideways
+    /// rule's foot placement and heading (`walker3d::drive3d`); observation
+    /// `walker3d::walk3d_obs`; reward as `Imitate`'s, plus not drifting sideways or turning.
+    /// Shoved forward, back and sideways.
+    Walk3d,
 }
 
 /// Corrections the imitation policy makes: torso lean, swing hip, knee and ankle, stance
@@ -36,6 +46,41 @@ pub const IMITATE_ACTIONS: usize = 6;
 pub const IMITATE_REACH: f64 = 0.3;
 /// The paces (m/s) the walking policy is trained for.
 pub const WALKING_PACE: (f64, f64) = (robot::SLOWEST_WALK, 1.6);
+/// The 3D walking policy's corrections: `Imitate`'s six, then the swing foot's sideways aim
+/// and the heading (`walker3d::SIDEWAYS_REACH` radians either way).
+pub const WALK3D_ACTIONS: usize = IMITATE_ACTIONS + 2;
+
+/// A 3D walking action, each entry in [-1, 1], as the corrections `walker3d::drive3d` takes.
+pub fn walk3d_adjust(action: &[f64]) -> Vec<f64> {
+    action
+        .iter()
+        .enumerate()
+        .map(|(k, a)| {
+            let reach = if k < IMITATE_ACTIONS {
+                IMITATE_REACH
+            } else {
+                walker3d::SIDEWAYS_REACH
+            };
+            reach * if a.is_nan() { 0.0 } else { a.clamp(-1.0, 1.0) }
+        })
+        .collect()
+}
+
+/// A random walking course from `from` to 30 m along: runs of 1 to 3 m at slopes up to
+/// `slope`, some of them starting with a step of up to `step` m up or down.
+pub fn course(rng: &mut Rng, from: f64, slope: f64, step: f64) -> Vec<[f64; 2]> {
+    let (mut x, mut y, mut points) = (from, 0.0, vec![[from, 0.0]]);
+    while x < 30.0 {
+        if rng.uniform() > 0.4 {
+            (x, y) = (x + 0.01, y + step * rng.uniform());
+            points.push([x, y]);
+        }
+        let run = 2.0 + rng.uniform();
+        (x, y) = (x + run, y + slope * rng.uniform() * run);
+        points.push([x, y]);
+    }
+    points
+}
 
 /// Result of one `Env::step`.
 pub struct Step {
@@ -104,6 +149,7 @@ impl Env {
         match self.task {
             Task::Imitate => IMITATE_ACTIONS,
             Task::GetUp => robot::GETUP_JOINTS.len(),
+            Task::Walk3d => WALK3D_ACTIONS,
             _ => self.motors().count(),
         }
     }
@@ -116,18 +162,34 @@ impl Env {
             Task::Hop => robot::hopper(),
             Task::Reach => robot::arm(),
             Task::Imitate | Task::GetUp => robot::walker(),
+            // Anywhere in the stride, at any walking pace.
+            Task::Walk3d => {
+                let pace = WALKING_PACE.0
+                    + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * rng.uniform());
+                walker3d::walker3d_in_stride(pace, 0.5 + 0.5 * rng.uniform())
+            }
         };
         // The agent drives the motors, not the built-in controller; except when imitating,
         // where it corrects the controller.
-        r.controller = None;
+        if self.task != Task::Walk3d {
+            r.controller = None;
+        }
+        self.pace = r.command;
         match self.task {
             Task::Balance => r.q[1] = 0.0, // upright
             Task::Hop => r.q[1] = 1.0,     // standing on the ground
             Task::GetUp => {
-                // One of the falls, jostled a little, at rest.
-                let poses = robot::fallen_poses();
-                r.q = poses[(0.5 * (rng.uniform() + 1.0) * poses.len() as f64) as usize].clone();
-                r.qd.iter_mut().for_each(|v| *v = 0.0);
+                // At rest, jostled a little: half the time in one of the falls, half the time
+                // in a pose from partway through a person's get-up.
+                let pick = |n: usize, u: f64| ((0.5 * (u + 1.0) * n as f64) as usize).min(n - 1);
+                if rng.uniform() > 0.0 {
+                    let k = pick(crate::mocap_getup::POSES.len(), rng.uniform());
+                    robot::pose_as_captured(&mut r, k, rng.uniform() > 0.0);
+                } else {
+                    let poses = robot::fallen_poses();
+                    r.q = poses[pick(poses.len(), rng.uniform())].clone();
+                    r.qd.iter_mut().for_each(|v| *v = 0.0);
+                }
                 r.controller = Some(robot::get_up);
                 r.adjust = robot::GETUP_JOINTS.iter().map(|&j| r.q[j]).collect();
             }
@@ -154,8 +216,16 @@ impl Env {
                     r.command = pace(&mut rng);
                     robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
                 }
+                // Most episodes on rough ground, from gentle to kerbs and steep slopes, starting
+                // (at the height it stands at) a metre or two ahead.
+                if rng.uniform() > -0.2 {
+                    let hard = 0.5 + 0.5 * rng.uniform();
+                    let from = r.q[0] + 1.5 + 0.5 * rng.uniform();
+                    r.terrain = course(&mut rng, from, 0.15 * hard, 0.15 * hard);
+                }
                 self.pace = r.command;
             }
+            Task::Walk3d => {}
             Task::Reach => {
                 let target = Vec3::new(
                     0.7 + 0.2 * rng.uniform(),
@@ -185,8 +255,9 @@ impl Env {
             }
             // The hopper's x position is left out, so a policy cannot depend on where it is.
             Task::Hop => r.q[1..].iter().chain(&r.qd).copied().collect(),
-            Task::Imitate => robot::imitation_obs(r),
+            Task::Imitate => robot::walk_obs(r),
             Task::GetUp => robot::getup_obs(r),
+            Task::Walk3d => walker3d::walk3d_obs(r),
             Task::Reach => {
                 let offset = r.target.unwrap() - self.tip();
                 r.q.iter()
@@ -218,6 +289,34 @@ impl Env {
                 .zip(robot::GETUP_RANGE)
                 .map(|(&a, (lo, hi))| lo + (hi - lo) * 0.5 * (clean(a) + 1.0))
                 .collect();
+        } else if self.task == Task::Walk3d {
+            self.robot.adjust = walk3d_adjust(action);
+            // A new pace about every three seconds, ramped to at 0.8 m/s² (no stops: the
+            // planar walker's standing is not made for balancing sideways).
+            if self.rng.uniform() > 1.0 - 1.0 / 90.0 {
+                self.pace = WALKING_PACE.0
+                    + (WALKING_PACE.1 - WALKING_PACE.0) * (0.5 + 0.5 * self.rng.uniform());
+            }
+            let change = self.pace - self.robot.command;
+            self.robot.command += change.clamp(-0.8 * Self::DT, 0.8 * Self::DT);
+            // About every two seconds, a shove on the chest for a fifth of a second: up to
+            // 300 N forward or back and 200 N sideways.
+            if self.shove_left == 0 && self.rng.uniform() > 1.0 - 1.0 / 60.0 {
+                let torso = self.robot.frames(&self.robot.q)[walker3d::TORSO];
+                let force = Vec3::new(300.0 * self.rng.uniform(), 0.0, 200.0 * self.rng.uniform());
+                self.robot.external = vec![robot::Push {
+                    link: walker3d::TORSO,
+                    at: torso.0 + torso.1 * Vec3::Y * 0.3,
+                    force,
+                }];
+                self.shove_left = 12;
+            }
+            if self.shove_left > 0 {
+                self.shove_left -= 1;
+                if self.shove_left == 0 {
+                    self.robot.external.clear();
+                }
+            }
         } else if self.task == Task::Imitate {
             self.robot.adjust = action.iter().map(|&a| IMITATE_REACH * clean(a)).collect();
             // About every three seconds, asked for a new pace, which the request ramps to at
@@ -275,10 +374,28 @@ impl Env {
             }
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
             Task::GetUp => {
+                // Rising pays, more so the way a person rises (DeepMimic's pose reward, against
+                // the nearest captured pose instead of one clip's, as falls start anywhere);
+                // lying in a captured pose pays nothing. Standing pays in full. Rolling over
+                // backwards, legs over the head, costs more than the time it saves: the style
+                // term alone was too faint beside standing to stop it.
                 let height = (robot::hip_height(r) / 0.9).clamp(0.0, 1.0);
                 let upright = 0.5 * (1.0 + r.q[robot::WALKER_TORSO].cos());
+                let style = 0.3 + 0.7 * robot::getup_style(r);
                 let standing = robot::is_standing(r) as u8 as f64;
-                (height * upright + standing, false)
+                let roll = 2.0 * robot::legs_over_hips(r) as u8 as f64;
+                (height * upright * style + standing - roll, false)
+            }
+            Task::Walk3d => {
+                let planar = r.shadow.as_ref().unwrap();
+                let pose = (-10.0 * robot::imitation_error(planar)).exp();
+                let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
+                let straight = (-4.0 * (r.qd[2].powi(2) + r.q[walker3d::YAW].powi(2))).exp();
+                let fallen = r.q[1] - r.floor_height(r.q[0]) < 0.7
+                    || r.q[walker3d::TORSO].abs() > 0.6
+                    || r.q[walker3d::ROLL].abs() > 0.6
+                    || r.q[walker3d::YAW].abs() > 1.0;
+                (0.4 * pose + 0.4 * speed + 0.2 * straight, fallen)
             }
             Task::Imitate => {
                 // DeepMimic's reward: near 1 when the pose matches, falling off smoothly.
@@ -383,6 +500,12 @@ pub fn hop_policy(obs: &[f64]) -> Vec<f64> {
 /// imitation controller's targets (`Task::Imitate`), same network shape as the hopper's.
 pub fn walk_policy(obs: &[f64]) -> Vec<f64> {
     network(include_bytes!("walk_policy.bin"), obs, IMITATE_ACTIONS)
+}
+
+/// The 3D walking policy trained by `python/train_hopper.py walk3d` (`Task::Walk3d`):
+/// corrections for `walker3d::drive3d`, each in [-1, 1] (scaled by `walk3d_adjust`).
+pub fn walk3d_policy(obs: &[f64]) -> Vec<f64> {
+    network(include_bytes!("walk3d_policy.bin"), obs, WALK3D_ACTIONS)
 }
 
 /// The get-up policy trained by `python/train_hopper.py getup` (`Task::GetUp`): a target

@@ -208,7 +208,7 @@ pub fn walk3d(r: &mut Robot) {
     let side = stance_side as usize;
     let (stance, swing) = (LEGS[side], LEGS[1 - side]);
     let frames = r.frames(&r.q);
-    let (pitch, roll, yaw) = (r.q[TORSO], r.q[ROLL], r.q[YAW]);
+    let pitch = r.q[TORSO];
     if landing_start.is_infinite()
         && (r.time - step_start > SWING_TIME || pitch + r.q[stance + THIGH] < -0.25)
     {
@@ -219,18 +219,7 @@ pub fn walk3d(r: &mut Robot) {
         r.memory[..4].copy_from_slice(&[1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY]);
         return walk3d(r);
     }
-    let (com, com_vel) = {
-        let total: f64 = r.links.iter().map(|l| l.mass).sum();
-        let vel = r.velocities_at(&frames);
-        let (p, v) = r.links.iter().zip(&frames).zip(&vel).fold(
-            (Vec3::ZERO, Vec3::ZERO),
-            |(p, v), ((l, (o, rot)), (w, vo))| {
-                let rc = *rot * l.com;
-                (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
-            },
-        );
-        (p / total, v / total)
-    };
+    let (com, com_vel) = centre_of_mass(r, &frames);
     let ankle = frames[stance + FOOT].0;
     let blend = {
         let x = ((r.time - landing_start) / 0.1).clamp(0.0, 1.0);
@@ -281,38 +270,8 @@ pub fn walk3d(r: &mut Robot) {
         KNEE_STIFFNESS,
     );
     torque[stance + ANKLE] = pd(q[stance + ANKLE], qd[stance + ANKLE], 0.0, ANKLE_STIFFNESS);
-    // Sideways: the swing leg lands out the way the body drifts (a positive hip angle swings
-    // the leg toward -z), the stance hip holds the torso level.
-    let drift = SIDEWAYS_GAINS.0 * (com.z - ankle.z) + SIDEWAYS_GAINS.1 * com_vel.z;
-    let swing_out = pd(roll + q[swing], qd[ROLL] + qd[swing], -drift, 300.0);
-    torque[swing] = swing_out;
-    torque[stance] = -pd(roll, qd[ROLL], 0.0, 600.0) - swing_out;
-    // Turning: the stance hip holds the torso facing +x, the swing leg points straight.
-    let swing_turn = pd(
-        yaw + q[swing + TWIST],
-        qd[YAW] + qd[swing + TWIST],
-        0.0,
-        100.0,
-    );
-    torque[swing + TWIST] = swing_turn;
-    torque[stance + TWIST] = -pd(yaw, qd[YAW], 0.0, 300.0) - swing_turn;
-    // Ankle roll: each foot flat across.
-    for leg in [stance, swing] {
-        let flat = -(roll + q[leg]);
-        let kp = if leg == stance { 150.0 } else { 30.0 };
-        torque[leg + FOOT] = pd(q[leg + FOOT], qd[leg + FOOT], flat, kp);
-    }
-    // Arms swing opposite their own side's leg.
-    for (shoulder, leg) in ARMS.into_iter().zip(LEGS) {
-        let want = -0.6 * (pitch + q[leg + THIGH]);
-        torque[shoulder] = pd(q[shoulder], qd[shoulder], want, 60.0);
-        torque[shoulder + 1] = pd(
-            q[shoulder + 1],
-            qd[shoulder + 1],
-            0.3 + 0.4 * want.max(0.0),
-            30.0,
-        );
-    }
+    sideways(r, &frames, side, [0.0; 2], &mut torque);
+    swing_arms(r, &mut torque);
     for (i, t) in torque.iter().enumerate().skip(TORSO + 1) {
         r.ctrl[i] = t / r.links[i].gear;
     }
@@ -330,4 +289,206 @@ fn sole(r: &Robot, frames: &[(Vec3, crate::Quat)], foot: usize) -> f64 {
             p.y - r.floor_height(p.x)
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+/// The joints the 3D walker shares with the planar walker, as (3D, planar) indices: the
+/// slides, the torso's pitch, each leg's hip, knee and ankle pitch, and the arms.
+const SAGITTAL: [(usize, usize); 14] = [
+    (0, 0),
+    (1, 1),
+    (2, 2),
+    (TORSO, 3),
+    (8, 4),
+    (9, 5),
+    (10, 6),
+    (14, 7),
+    (15, 8),
+    (16, 9),
+    (18, 10),
+    (19, 11),
+    (20, 12),
+    (21, 13),
+];
+
+/// How far (rad) the 3D policy may move the swing foot's sideways aim and the heading the
+/// stance hip holds, on top of `sideways`.
+pub const SIDEWAYS_REACH: f64 = 0.3;
+
+/// The 3D walker under the walking policy for 3D (`env::walk3d_policy`, `env::Task::Walk3d`),
+/// asked once a frame as it was trained; knocked down, it goes limp.
+pub fn mimic3d(r: &mut Robot) {
+    let down = r.q[1] - r.floor_height(r.q[0]) < 0.6 || r.q[ROLL].cos() * r.q[TORSO].cos() < 0.5;
+    if down {
+        r.ctrl.iter_mut().for_each(|c| *c = 0.0);
+        return;
+    }
+    let frame_start = ((r.time * 60.0).round() - r.time * 60.0).abs() < 1e-6;
+    if frame_start || r.adjust.len() != crate::env::WALK3D_ACTIONS {
+        let a = crate::env::walk3d_policy(&walk3d_obs(r));
+        r.adjust = crate::env::walk3d_adjust(&a);
+    }
+    drive3d(r);
+}
+
+/// The 3D walker driven by the planar walker's motion-capture controller (`robot::imitate`)
+/// and the corrections in `Robot::adjust` (`env::WALK3D_ACTIONS` of them: the planar policy's
+/// six, then the swing foot's sideways aim and the heading, in radians). Forward motion,
+/// stepping and stopping are worked out on a planar stand-in that copies this body's
+/// forward-plane joints; sideways balance, turning and the feet's roll as in `walk3d`.
+pub fn drive3d(r: &mut Robot) {
+    let mut planar = r
+        .shadow
+        .take()
+        .unwrap_or_else(|| Box::new(crate::robot::walker()));
+    for (a, b) in SAGITTAL {
+        (planar.q[b], planar.qd[b]) = (r.q[a], r.qd[a]);
+    }
+    (planar.time, planar.command) = (r.time, r.command);
+    let adjust = r.adjust.clone();
+    planar.adjust = adjust.iter().take(6).copied().collect();
+    crate::robot::imitate(&mut planar);
+    let mut torque = vec![0.0; r.q.len()];
+    for (a, b) in SAGITTAL.into_iter().skip(4) {
+        torque[a] = planar.ctrl[b] * planar.links[b].gear;
+    }
+    r.memory = planar.memory;
+    let frames = r.frames(&r.q);
+    let offsets = [adjust.get(6), adjust.get(7)].map(|a| a.copied().unwrap_or(0.0));
+    sideways(
+        r,
+        &frames,
+        support(r, &frames, &planar),
+        offsets,
+        &mut torque,
+    );
+    swing_arms(r, &mut torque);
+    for (i, t) in torque.iter().enumerate().skip(TORSO + 1) {
+        r.ctrl[i] = t / r.links[i].gear;
+    }
+    r.target = planar.target;
+    r.shadow = Some(planar);
+}
+
+/// The leg bearing the weight: the planar controller's stance leg, unless its foot is still
+/// more than a centimetre above the other. (Its steps begin as the swinging foot slows for
+/// the ground, a moment before it lands; holding the body's roll and heading against a leg
+/// still in the air only twists the leg.)
+fn support(r: &Robot, frames: &[(Vec3, crate::Quat)], planar: &Robot) -> usize {
+    let side = planar.memory[0] as usize;
+    let [a, b] = [side, 1 - side].map(|s| sole(r, frames, LEGS[s] + FOOT));
+    if a > b + 0.01 { 1 - side } else { side }
+}
+
+/// What the 3D walking policy sees: the planar walking policy's observation of the stand-in
+/// (`robot::imitation_obs`), then the torso's roll and heading and their rates, the sideways
+/// speed, how far the centre of mass is beside the stance foot, and each hip's sideways angle
+/// (stance, then swing). Rates scaled by 0.1.
+pub fn walk3d_obs(r: &Robot) -> Vec<f64> {
+    let planar = r
+        .shadow
+        .as_ref()
+        .expect("a 3D walker under drive3d has a stand-in");
+    let frames = r.frames(&r.q);
+    let side = support(r, &frames, planar);
+    let (com, _) = centre_of_mass(r, &frames);
+    let mut obs = crate::robot::imitation_obs(planar);
+    obs.extend([
+        r.q[ROLL],
+        0.1 * r.qd[ROLL],
+        r.q[YAW],
+        0.1 * r.qd[YAW],
+        r.qd[2],
+        com.z - frames[LEGS[side] + FOOT].0.z,
+        r.q[LEGS[side]],
+        r.q[LEGS[1 - side]],
+    ]);
+    obs
+}
+
+/// The 3D walker started as the planar walker starts in stride (`robot::start_in_stride`):
+/// at `pace` m/s, `phase` of the way through a step, under `drive3d` (no policy yet).
+pub fn walker3d_in_stride(pace: f64, phase: f64) -> Robot {
+    let mut r = walker3d();
+    let mut planar = crate::robot::walker();
+    planar.command = pace;
+    crate::robot::start_in_stride(&mut planar, phase);
+    for (a, b) in SAGITTAL {
+        (r.q[a], r.qd[a]) = (planar.q[b], planar.qd[b]);
+    }
+    (r.memory, r.command) = (planar.memory, pace);
+    r.shadow = Some(Box::new(planar));
+    r.controller = Some(drive3d);
+    r
+}
+
+/// Centre of mass and its velocity.
+fn centre_of_mass(r: &Robot, frames: &[(Vec3, crate::Quat)]) -> (Vec3, Vec3) {
+    let total: f64 = r.links.iter().map(|l| l.mass).sum();
+    let vel = r.velocities_at(frames);
+    let (p, v) = r.links.iter().zip(frames).zip(&vel).fold(
+        (Vec3::ZERO, Vec3::ZERO),
+        |(p, v), ((l, (o, rot)), (w, vo))| {
+            let rc = *rot * l.com;
+            (p + (*o + rc) * l.mass, v + (*vo + w.cross(rc)) * l.mass)
+        },
+    );
+    (p / total, v / total)
+}
+
+/// Sideways balance, turning and the feet's roll, with leg `side` on the ground: the swing
+/// leg lands out the way the body drifts (a positive hip angle swings the leg toward -z), the
+/// stance hip holds the torso level and facing +x, the swing leg points straight, and each
+/// foot lies flat across. `offsets` move the swing leg's sideways aim and the heading held.
+fn sideways(
+    r: &Robot,
+    frames: &[(Vec3, crate::Quat)],
+    side: usize,
+    offsets: [f64; 2],
+    torque: &mut [f64],
+) {
+    let (stance, swing) = (LEGS[side], LEGS[1 - side]);
+    let (q, qd) = (&r.q, &r.qd);
+    let (roll, yaw) = (q[ROLL], q[YAW]);
+    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
+    let (com, com_vel) = centre_of_mass(r, frames);
+    let ankle = frames[stance + FOOT].0;
+    let drift = SIDEWAYS_GAINS.0 * (com.z - ankle.z) + SIDEWAYS_GAINS.1 * com_vel.z;
+    let swing_out = pd(
+        roll + q[swing],
+        qd[ROLL] + qd[swing],
+        offsets[0] - drift,
+        300.0,
+    );
+    torque[swing] = swing_out;
+    torque[stance] = -pd(roll, qd[ROLL], 0.0, 600.0) - swing_out;
+    let swing_turn = pd(
+        yaw + q[swing + TWIST],
+        qd[YAW] + qd[swing + TWIST],
+        0.0,
+        100.0,
+    );
+    torque[swing + TWIST] = swing_turn;
+    torque[stance + TWIST] = -pd(yaw, qd[YAW], offsets[1], 300.0) - swing_turn;
+    for leg in [stance, swing] {
+        let flat = -(roll + q[leg]);
+        let kp = if leg == stance { 150.0 } else { 30.0 };
+        torque[leg + FOOT] = pd(q[leg + FOOT], qd[leg + FOOT], flat, kp);
+    }
+}
+
+/// Arms swing opposite their own side's leg, as people's do, which also cancels some of the
+/// legs' twist on the body.
+fn swing_arms(r: &Robot, torque: &mut [f64]) {
+    let (q, qd, pitch) = (&r.q, &r.qd, r.q[TORSO]);
+    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
+    for (shoulder, leg) in ARMS.into_iter().zip(LEGS) {
+        let want = -0.6 * (pitch + q[leg + THIGH]);
+        torque[shoulder] = pd(q[shoulder], qd[shoulder], want, 60.0);
+        torque[shoulder + 1] = pd(
+            q[shoulder + 1],
+            qd[shoulder + 1],
+            0.3 + 0.4 * want.max(0.0),
+            30.0,
+        );
+    }
 }

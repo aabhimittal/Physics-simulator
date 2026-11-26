@@ -142,6 +142,9 @@ pub struct Robot {
     anchors: Vec<Option<Vec3>>,
     /// The joint angles the walker holds while standing still (empty while walking).
     held: Vec<f64>,
+    /// A planar walker standing in for this body's forward motion, kept between steps for its
+    /// controller's state (`walker3d::mimic3d`).
+    pub shadow: Option<Box<Robot>>,
 }
 
 impl Robot {
@@ -165,6 +168,7 @@ impl Robot {
             anchors: vec![None; 8 * n],
             terrain: Vec::new(),
             held: Vec::new(),
+            shadow: None,
         }
     }
 
@@ -1345,6 +1349,21 @@ pub fn imitation_obs(r: &Robot) -> Vec<f64> {
     .collect()
 }
 
+/// The floor ahead, as the walking policy sees it: its height 0.2, 0.4, 0.6 and 0.8 m ahead
+/// of the hips, relative to the floor beneath them. (A step must be seen before the swing
+/// foot reaches it: by then, lifting the foot higher is too late.)
+pub fn terrain_ahead(r: &Robot) -> [f64; 4] {
+    let base = r.floor_height(r.q[0]);
+    [0.2, 0.4, 0.6, 0.8].map(|d| r.floor_height(r.q[0] + d) - base)
+}
+
+/// What the walking policy sees: `imitation_obs`, then `terrain_ahead`.
+pub fn walk_obs(r: &Robot) -> Vec<f64> {
+    let mut obs = imitation_obs(r);
+    obs.extend(terrain_ahead(r));
+    obs
+}
+
 /// The walker's controller with the trained policy correcting it: `imitate`, steered by
 /// `env::walk_policy`.
 pub fn mimic_walk(r: &mut Robot) {
@@ -1389,7 +1408,7 @@ pub fn mimic_walk(r: &mut Robot) {
         return;
     }
     if r.memory[4] == 0.0 {
-        r.adjust = walk_policy(&imitation_obs(r))
+        r.adjust = walk_policy(&walk_obs(r))
             .iter()
             .map(|a| IMITATE_REACH * a.clamp(-1.0, 1.0))
             .collect();
@@ -1561,6 +1580,99 @@ pub fn getup_obs(r: &Robot) -> Vec<f64> {
             .map(|&hip| sole_height(r, &frames, hip + 2)),
     )
     .collect()
+}
+
+/// How much the walker looks like a person getting up: near 1 when its pose is close to one
+/// of a person's motion-captured get-ups (`mocap_getup`, which end still crouched) or to
+/// standing tall, falling off with the mean squared angle error to the nearest of them (more
+/// gently than the walking imitation, which starts on its reference; falls start anywhere, so
+/// this must still tell a nearly human pose from an inhuman one). Either leg, and either arm,
+/// may match either side.
+pub fn getup_style(r: &Robot) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    // Torso, thighs and knees straight, feet flat, arms hanging with the elbows eased.
+    const STANDING_TALL: [f64; 11] = [0.0, 0.0, -0.05, 0.05, 0.0, -0.05, 0.05, 0.0, 0.2, 0.0, 0.2];
+    let pitch = r.q[WALKER_TORSO];
+    let leg = |hip: usize| [pitch + r.q[hip], r.q[hip + 1], r.q[hip + 2]];
+    let arm = |shoulder: usize| [pitch + r.q[shoulder], r.q[shoulder + 1]];
+    let (legs, arms) = (WALKER_HIPS.map(leg), SHOULDERS.map(arm));
+    let wrap = |a: f64| (a + PI).rem_euclid(TAU) - PI;
+    let err = |have: &[f64], want: &[f64]| -> f64 {
+        have.iter()
+            .zip(want)
+            .map(|(a, b)| wrap(a - b).powi(2))
+            .sum()
+    };
+    let nearest = crate::mocap_getup::POSES
+        .iter()
+        .chain([&STANDING_TALL])
+        .map(|m| {
+            let legs = (err(&legs[0], &m[1..4]) + err(&legs[1], &m[4..7]))
+                .min(err(&legs[1], &m[1..4]) + err(&legs[0], &m[4..7]));
+            let arms = (err(&arms[0], &m[7..9]) + err(&arms[1], &m[9..11]))
+                .min(err(&arms[1], &m[7..9]) + err(&arms[0], &m[9..11]));
+            wrap(pitch - m[0]).powi(2) + legs + arms
+        })
+        .fold(f64::INFINITY, f64::min);
+    (-2.0 * nearest / 11.0).exp()
+}
+
+/// Poses the walker in `mocap_getup::POSES[k]` (legs and arms swapped if `mirror`), at rest,
+/// lying or crouched on the floor: DeepMimic's reference state initialisation, so a get-up
+/// policy practises from partway through a person's get-up, not only from where falls leave
+/// it, and so learns the stages it would never stumble on from lying down.
+pub fn pose_as_captured(r: &mut Robot, k: usize, mirror: bool) {
+    let m = crate::mocap_getup::POSES[k];
+    let pitch = m[0];
+    let (legs, arms) = if mirror {
+        (
+            [WALKER_HIPS[1], WALKER_HIPS[0]],
+            [SHOULDERS[1], SHOULDERS[0]],
+        )
+    } else {
+        (WALKER_HIPS, SHOULDERS)
+    };
+    r.q.iter_mut().for_each(|q| *q = 0.0);
+    r.qd.iter_mut().for_each(|v| *v = 0.0);
+    r.q[WALKER_TORSO] = pitch;
+    for (leg, at) in legs.into_iter().zip([1, 4]) {
+        (r.q[leg], r.q[leg + 1], r.q[leg + 2]) = (m[at] - pitch, m[at + 1], m[at + 2]);
+    }
+    for (arm, at) in arms.into_iter().zip([7, 9]) {
+        (r.q[arm], r.q[arm + 1]) = (m[at] - pitch, m[at + 1]);
+    }
+    for (q, l) in r.q.iter_mut().zip(&r.links) {
+        if let Some((lo, hi)) = l.range {
+            *q = q.clamp(lo, hi);
+        }
+    }
+    // Down onto the floor: the lowest corner of any link just touching it.
+    let frames = r.frames(&r.q);
+    let lowest = r
+        .links
+        .iter()
+        .zip(&frames)
+        .flat_map(|(l, (o, rot))| {
+            (0..8).map(move |c| {
+                let corner = Vec3::new(
+                    [-1.0, 1.0][c & 1],
+                    [-1.0, 1.0][(c >> 1) & 1],
+                    [-1.0, 1.0][c >> 2],
+                );
+                (*o + *rot * (l.com + l.half * corner)).y
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    r.q[1] += 0.002 - lowest;
+}
+
+/// A foot more than 30 cm above its hip: legs thrown over the head, as in a backward roll,
+/// which people getting up do not do.
+pub fn legs_over_hips(r: &Robot) -> bool {
+    let frames = r.frames(&r.q);
+    WALKER_HIPS
+        .iter()
+        .any(|&hip| frames[hip + 2].0.y > frames[hip].0.y + 0.3)
 }
 
 /// Up and steady on both feet: hip at standing height, torso upright, soles down.

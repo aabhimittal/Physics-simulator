@@ -3,7 +3,7 @@
 Build the library first:  cargo build --release
 
     from physics_simulator import Env
-    env = Env("balance")                  # or "hop", "reach", "imitate", "getup"
+    env = Env("balance")                  # or "hop", "reach", "imitate", "getup", "walk3d"
     obs = env.reset(seed=1)
     obs, reward, terminated, truncated = env.step([0.0])
 
@@ -15,7 +15,7 @@ import os
 import sys
 from pathlib import Path
 
-TASKS = {"balance": 0, "hop": 1, "reach": 2, "imitate": 3, "getup": 4}
+TASKS = {"balance": 0, "hop": 1, "reach": 2, "imitate": 3, "getup": 4, "walk3d": 5}
 
 
 def _load():
