@@ -600,21 +600,8 @@ fn walker_stops_and_sets_off_again() {
 fn walker_crosses_uneven_ground() {
     // Random courses of slopes up to 8% and steps up to 5 cm up or down, and the crossing's
     // pavement with its dropped kerbs: the walker, trained on flat ground, walks 15 s of each.
-    use physics_simulator::env::Rng;
-    let course = |seed| {
-        let mut rng = Rng::new(seed);
-        let (mut x, mut y, mut points) = (3.0, 0.0, vec![[3.0, 0.0]]);
-        while x < 30.0 {
-            if rng.uniform() > 0.4 {
-                (x, y) = (x + 0.01, y + 0.05 * rng.uniform());
-                points.push([x, y]);
-            }
-            let run = 2.0 + rng.uniform();
-            (x, y) = (x + run, y + 0.08 * rng.uniform() * run);
-            points.push([x, y]);
-        }
-        points
-    };
+    use physics_simulator::env::{Rng, course};
+    let course = |seed| course(&mut Rng::new(seed), 3.0, 0.08, 0.05);
     let pavement = physics_simulator::scenes::pavement()
         .iter()
         .map(|[x, y]| [x - 22.0, *y])
