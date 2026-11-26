@@ -407,8 +407,12 @@ impl Env {
                     (-10.0 * robot::imitation_error(r)).exp()
                 };
                 let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
+                // On flat ground the pose counts for more: trained half on rough ground at
+                // equal weights, the policy walked 8° rms off the capture even on the flat.
+                let flat = robot::terrain_ahead(r).iter().all(|h| h.abs() < 0.01);
+                let w = if flat { 0.7 } else { 0.5 };
                 (
-                    0.5 * pose + 0.5 * speed,
+                    w * pose + (1.0 - w) * speed,
                     robot::hip_height(r) < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }
