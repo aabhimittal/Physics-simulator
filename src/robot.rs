@@ -1617,6 +1617,55 @@ pub fn getup_style(r: &Robot) -> f64 {
     (-2.0 * nearest / 11.0).exp()
 }
 
+/// Poses the walker in `mocap_getup::POSES[k]` (legs and arms swapped if `mirror`), at rest,
+/// lying or crouched on the floor: DeepMimic's reference state initialisation, so a get-up
+/// policy practises from partway through a person's get-up, not only from where falls leave
+/// it, and so learns the stages it would never stumble on from lying down.
+pub fn pose_as_captured(r: &mut Robot, k: usize, mirror: bool) {
+    let m = crate::mocap_getup::POSES[k];
+    let pitch = m[0];
+    let (legs, arms) = if mirror {
+        (
+            [WALKER_HIPS[1], WALKER_HIPS[0]],
+            [SHOULDERS[1], SHOULDERS[0]],
+        )
+    } else {
+        (WALKER_HIPS, SHOULDERS)
+    };
+    r.q.iter_mut().for_each(|q| *q = 0.0);
+    r.qd.iter_mut().for_each(|v| *v = 0.0);
+    r.q[WALKER_TORSO] = pitch;
+    for (leg, at) in legs.into_iter().zip([1, 4]) {
+        (r.q[leg], r.q[leg + 1], r.q[leg + 2]) = (m[at] - pitch, m[at + 1], m[at + 2]);
+    }
+    for (arm, at) in arms.into_iter().zip([7, 9]) {
+        (r.q[arm], r.q[arm + 1]) = (m[at] - pitch, m[at + 1]);
+    }
+    for (q, l) in r.q.iter_mut().zip(&r.links) {
+        if let Some((lo, hi)) = l.range {
+            *q = q.clamp(lo, hi);
+        }
+    }
+    // Down onto the floor: the lowest corner of any link just touching it.
+    let frames = r.frames(&r.q);
+    let lowest = r
+        .links
+        .iter()
+        .zip(&frames)
+        .flat_map(|(l, (o, rot))| {
+            (0..8).map(move |c| {
+                let corner = Vec3::new(
+                    [-1.0, 1.0][c & 1],
+                    [-1.0, 1.0][(c >> 1) & 1],
+                    [-1.0, 1.0][c >> 2],
+                );
+                (*o + *rot * (l.com + l.half * corner)).y
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    r.q[1] += 0.002 - lowest;
+}
+
 /// A foot more than 30 cm above its hip: legs thrown over the head, as in a backward roll,
 /// which people getting up do not do.
 pub fn legs_over_hips(r: &Robot) -> bool {

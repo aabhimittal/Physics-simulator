@@ -188,10 +188,13 @@ def clip(bones, children, amc):
 
 def getup(bones, children, amc):
     """Every fourth frame (30 Hz) of a get-up in `amc`, up to where the hips are highest (the
-    person is still bent there, in a ready crouch, not standing tall):
+    person is still bent there, in a ready crouch, not standing tall), leaving out frames with a
+    leg or the torso mostly out of the plane (a leg splayed sideways projects to a short stub
+    whose angle means nothing):
     torso pitch, then each leg's thigh, knee and ankle, then each arm's upper arm and elbow,
     both sides kept (a get-up is not symmetric). The plane is the one the person faces once
-    up (these get-ups turn less than 20 degrees on the way)."""
+    up (these get-ups turn less than 20 degrees on the way). Also left out: frames the capture got
+    physically wrong (a joint through the floor)."""
     frames = [positions(bones, children, f) for f in read_amc(amc)]
     # Up is where the hips are highest; after it the person settles into a ready crouch.
     frames = frames[: 1 + int(np.argmax([p["root"][1] for p in frames]))]
@@ -205,15 +208,29 @@ def getup(bones, children, amc):
         fwd = -fwd
     plane = lambda v: (v @ fwd, v @ up)  # noqa: E731
     foot_rest = rest_foot(bones, children, plane)
-    rows = []
+    def in_plane(a, b):  # how much of limb a->b lies in the plane: a sideways limb's angle is noise
+        v = b - a
+        return np.hypot(*plane(v)) / np.linalg.norm(v)
+
+    limbs = [("root", "thorax")] + [(s + a, s + b) for s in "lr" for a, b in [("hipjoint", "femur"), ("femur", "tibia")]]
+    # Lying down hides markers against the floor and the capture's solver guesses, sometimes
+    # putting a knee through it: leave out frames with any joint 5 cm below the floor the
+    # person stands on at the end.
+    floor = min(end["lfoot"][1], end["rfoot"][1]) - 0.05 * 0.45 / 0.0254
+    joints = {j for limb in limbs for j in limb} | {"lfoot", "rfoot", "head"}
+    rows, dropped = [], 0
     for p in frames[::4]:
+        if min(in_plane(p[a], p[b]) for a, b in limbs) < 0.6 or min(p[j][1] for j in joints) < floor:
+            dropped += 1
+            continue
         torso, *left = angles(p, "l", plane, foot_rest)
         _, *right_ = angles(p, "r", plane, foot_rest)
         rows.append([torso, *left[:3], *right_[:3], *left[3:], *right_[3:]])
     rows = np.array(rows)
     # Torso pitch can pass through ±π (face down to face up); keep it continuous.
     rows[:, 0] = np.unwrap(rows[:, 0])
-    print(f"// {amc}: {len(rows)} poses, from torso {rows[0, 0]:.2f} to {rows[-1, 0]:.2f}",
+    print(f"// {amc}: {len(rows)} poses ({dropped} dropped: a leg or the torso mostly out of the "
+          f"plane, or a joint through the floor), from torso {rows[0, 0]:.2f} to {rows[-1, 0]:.2f}",
           file=sys.stderr)
     assert abs(rows[0, 0]) > 1.0, "does not start lying down"
     return rows
