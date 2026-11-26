@@ -311,20 +311,44 @@ practised only falls forward or back, in the plane, and may take two attempts.
 ### Walking in 3D
 
 `src/walker3d.rs`. The same body with the plane taken away: 22 joints, the torso free to
-roll and turn, hips that also swing out and twist, ankles that also roll. Its controller is
-written by hand, not learned: SIMBICON (Yin, Loken and van de Panne, 2007) in both
-directions. Forward, the swing leg lands further ahead the further and faster the body is
-ahead of the stance foot, as in the planar walker. Sideways, the same rule with its own two
-gains puts the swing foot out under a body that is tipping that way, which is how people
-catch themselves when shoved. The stance hip holds the torso level and facing ahead, and
-each foot rolls to lie flat.
+roll and turn, hips that also swing out and twist, ankles that also roll.
 
-`walker_in_3d_walks_and_catches_itself_sideways` walks it 12 s (10.7 m) and shoves it
-sideways (about 120 and 200 N for 0.2 s) at four moments of the stride: it recovers from 12
-of 16. Limits, honestly: the sideways gains work in a narrow band (their grid neighbours
-fall); starting from standing tips it sideways for the first few seconds, so it drifts about
-1.3 m before settling into a straight 1.3 m/s walk; it cannot turn on purpose; and it does
-not use the motion-capture policy. Training that policy in 3D is the upgrade.
+Forward, it walks exactly as the planar walker does: `drive3d` copies this body's
+forward-plane joints onto a planar stand-in (`Robot::shadow`), runs the motion-capture
+controller on it, and applies the torques it asks for. Sideways, it uses SIMBICON's rule
+(Yin, Loken and van de Panne, 2007) turned through a right angle: the swing foot lands
+further out the further and faster the body is tipping that way, the stance hip holds the
+torso level and facing ahead, and each foot rolls to lie flat. A policy trained in 3D
+(`env::Task::Walk3d`, `src/walk3d_policy.bin`) corrects both: the planar policy's six
+corrections, plus where the swing foot lands sideways and which way the body faces.
+
+Getting there took two findings:
+
+- **The stance leg is not always on the ground.** A captured step begins as the swinging
+  foot slows for the floor, a moment before it lands. In the plane that only shifts when the
+  stance hip holds the torso, but here it chose the leg to hold the body's roll and heading
+  against the ground, and for the first ~15% of every step that leg was in the air: the body
+  spun about the vertical within half a second. It now takes the leg actually bearing weight
+  (`support`). Four other fixes (sideways gains, stiffer heading, exact foot contact, arm
+  swing) were tried first and did not help.
+- **Not a 3D problem.** Without the policy's corrections the 3D walker fell within half a
+  second, but so does the planar one. So it was trained, starting from the planar policy
+  (`warm_start` in `python/train_hopper.py`: its weights for the inputs the two share, zeros
+  for the new ones) and shoved forward, back and sideways.
+
+`walker_in_3d_walks_and_catches_itself_sideways` walks it 12 s and shoves it sideways
+(about 120 and 200 N for 0.2 s) at four moments of the stride. Against the hand-written 3D
+SIMBICON it replaced:
+
+| | 3D SIMBICON (hand-written) | trained 3D policy |
+|---|---|---|
+| walked in 12 s | 10.7 m | 14.1 m (the captured pace) |
+| drifted sideways | 1.3 m | 0.9 m |
+| sideways shoves survived | 12 of 16 | 12 of 16 |
+
+Limits: it cannot turn on purpose, stop, or get up (knocked down, it goes limp); and the
+policy trained only 1.2M steps (about an hour), so it is far from what more training would
+give.
 
 ## Car
 
