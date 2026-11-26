@@ -9,7 +9,8 @@ every tenth of the run: return, episode length in seconds, and for the hopper
 the distance travelled (hop and imitate).
 
 The best checkpoint is saved as ppo_<task>.zip, and its network as ppo_<task>.bin; the
-latest as ppo_<task>_last.zip, which a later run can resume from (long runs, such as
+latest as ppo_<task>_last.zip, which a later run can resume from, and every evaluation's
+network as ppo_<task>_<steps>.bin, to choose by testing rather than by return (long runs, such as
 walk3d's, go in pieces). imitate and walk3d start from the current planar walking policy
 (see warm_start).
 To watch a new hopper policy in the browser, copy ppo_hop.bin over
@@ -116,6 +117,7 @@ def main():
         ret, seconds, metres = evaluate(model, task)
         print(f"{model.num_timesteps:>9} {ret:>8.1f} {seconds:>8.2f} {metres:>7.2f}", flush=True)
         model.save(f"ppo_{task}_last")
+        export(model, f"ppo_{task}_{model.num_timesteps}.bin")  # the return is a poor guide: keep each, to test
         # PPO can collapse late in a run, so keep the best checkpoint, not the last.
         if ret > best:
             best = ret

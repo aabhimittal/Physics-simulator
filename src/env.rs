@@ -23,7 +23,7 @@ pub enum Task {
     /// controller's joint targets. Observation `robot::walk_obs` (in stance/swing order, then
     /// the floor ahead); action in stance/swing order; reward = how closely the pose matches
     /// the capture, plus walking at the speed asked for, which changes now and then between
-    /// 0.6 and 1.6 m/s; a quarter of episodes start standing still, and most on a random
+    /// 0.6 and 1.6 m/s; a quarter of episodes start standing still, and half on a random
     /// course of slopes and steps (`course`) up to 15% and 15 cm.
     Imitate,
     /// Walker, fallen: get up. The policy sets a target angle for each joint it moves
@@ -216,9 +216,10 @@ impl Env {
                     r.command = pace(&mut rng);
                     robot::start_in_stride(&mut r, 0.5 + 0.5 * rng.uniform());
                 }
-                // Most episodes on rough ground, from gentle to kerbs and steep slopes, starting
-                // (at the height it stands at) a metre or two ahead.
-                if rng.uniform() > -0.2 {
+                // Half the episodes on rough ground, from gentle to kerbs and steep slopes,
+                // starting (at the height it stands at) a metre or two ahead. (With more, the
+                // policy walked less like the capture on flat ground too.)
+                if rng.uniform() > 0.0 {
                     let hard = 0.5 + 0.5 * rng.uniform();
                     let from = r.q[0] + 1.5 + 0.5 * rng.uniform();
                     r.terrain = course(&mut rng, from, 0.15 * hard, 0.15 * hard);
