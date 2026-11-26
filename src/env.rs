@@ -28,9 +28,7 @@ pub enum Task {
     Imitate,
     /// Walker, fallen: get up. The policy sets a target angle for each joint it moves
     /// (`robot::GETUP_JOINTS`); observation `robot::getup_obs`; reward = hip height times
-    /// uprightness times how like a person's get-up the pose is, plus a bonus for standing on
-    /// both feet, less a cost for rolling over backwards. Half the episodes start from a
-    /// fall, half partway through a person's captured get-up (`robot::pose_as_captured`).
+    /// uprightness, plus a bonus for standing on both feet.
     GetUp,
     /// The 3D walker: walk like the motion capture, as `Imitate`, and keep straight. The
     /// policy corrects the planar controller's targets as `Imitate` does, and the sideways
@@ -179,17 +177,10 @@ impl Env {
             Task::Balance => r.q[1] = 0.0, // upright
             Task::Hop => r.q[1] = 1.0,     // standing on the ground
             Task::GetUp => {
-                // At rest, jostled a little: half the time in one of the falls, half the time
-                // in a pose from partway through a person's get-up.
-                let pick = |n: usize, u: f64| ((0.5 * (u + 1.0) * n as f64) as usize).min(n - 1);
-                if rng.uniform() > 0.0 {
-                    let k = pick(crate::mocap_getup::POSES.len(), rng.uniform());
-                    robot::pose_as_captured(&mut r, k, rng.uniform() > 0.0);
-                } else {
-                    let poses = robot::fallen_poses();
-                    r.q = poses[pick(poses.len(), rng.uniform())].clone();
-                    r.qd.iter_mut().for_each(|v| *v = 0.0);
-                }
+                // One of the falls, jostled a little, at rest.
+                let poses = robot::fallen_poses();
+                r.q = poses[(0.5 * (rng.uniform() + 1.0) * poses.len() as f64) as usize].clone();
+                r.qd.iter_mut().for_each(|v| *v = 0.0);
                 r.controller = Some(robot::get_up);
                 r.adjust = robot::GETUP_JOINTS.iter().map(|&j| r.q[j]).collect();
             }
@@ -375,17 +366,10 @@ impl Env {
             }
             Task::Reach => (-(r.target.unwrap() - self.tip()).length(), false),
             Task::GetUp => {
-                // Rising pays, more so the way a person rises (DeepMimic's pose reward, against
-                // the nearest captured pose instead of one clip's, as falls start anywhere);
-                // lying in a captured pose pays nothing. Standing pays in full. Rolling over
-                // backwards, legs over the head, costs more than the time it saves: the style
-                // term alone was too faint beside standing to stop it.
                 let height = (robot::hip_height(r) / 0.9).clamp(0.0, 1.0);
                 let upright = 0.5 * (1.0 + r.q[robot::WALKER_TORSO].cos());
-                let style = 0.3 + 0.7 * robot::getup_style(r);
                 let standing = robot::is_standing(r) as u8 as f64;
-                let roll = 2.0 * robot::legs_over_hips(r) as u8 as f64;
-                (height * upright * style + standing - roll, false)
+                (height * upright + standing, false)
             }
             Task::Walk3d => {
                 let planar = r.shadow.as_ref().unwrap();
@@ -407,12 +391,8 @@ impl Env {
                     (-10.0 * robot::imitation_error(r)).exp()
                 };
                 let speed = (-16.0 * (r.qd[0] - r.command).powi(2)).exp();
-                // On flat ground the pose counts for more: trained half on rough ground at
-                // equal weights, the policy walked 8° rms off the capture even on the flat.
-                let flat = robot::terrain_ahead(r).iter().all(|h| h.abs() < 0.01);
-                let w = if flat { 0.7 } else { 0.5 };
                 (
-                    w * pose + (1.0 - w) * speed,
+                    0.5 * pose + 0.5 * speed,
                     robot::hip_height(r) < 0.7 || r.q[robot::WALKER_TORSO].abs() > 0.6,
                 )
             }

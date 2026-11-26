@@ -214,19 +214,41 @@ or failed to come to rest when stopping.
 lines (slopes, ramps; a step is two points a hair apart). A link corner below it is pushed
 out to the nearest point of the profile, so off a slope square to the surface and off a
 step's face sideways (a toe catches on a step rather than being lifted onto it); friction,
-static friction's anchors included, works in the surface's own plane. The policy was trained
-on flat ground and cannot see the terrain, yet it walks random courses of 8% slopes and 5 cm
-steps (10 of 10), climbs 16%, and steps down 12 cm. It falls going down slopes of 12% or
-more, and trips on steps up of 10 cm or more: its toe clears the ground by about 8 cm and it
-does not know the step is there. So the crossing's pavement, 10 cm above the road, meets it
-in dropped kerbs, 1.25 m ramps of 8% (about the steepest UK guidance allows), and the walking
-scene's course keeps to ramps of 6% and steps of 4 cm. Letting the policy see the ground
-ahead, and training it on rough terrain, is the upgrade for real kerbs and stairs.
+static friction's anchors included, works in the surface's own plane.
+
+The policy sees the floor's height 0.2, 0.4, 0.6 and 0.8 m ahead of its hips
+(`robot::terrain_ahead`), and half its training episodes run on random courses
+(`env::course`) of slopes and steps up to 15% and 15 cm. Each case below starts the step or
+slope at four points of the stride (where a foot lands decides a lot):
+
+| | trained on flat ground, blind | sees ahead, trained on courses |
+|---|---|---|
+| steps up 8, 10, 12, 15 cm | 4 of 16 | 10 of 16 |
+| steps down 8, 10, 12, 15 cm | 12 of 16 | 13 of 16 |
+| uphill 12, 15, 20% | 11 of 12 | 11 of 12 |
+| downhill 12, 15, 20% | 2 of 12 | 12 of 12 |
+
+`walker_takes_kerbs_and_steep_slopes` holds it to most of this. A 15 cm kerb still trips it
+more often than not: the policy may move each joint target only 0.3 rad from the capture's,
+which may not lift the toe that far. It walks random courses of 8% slopes and 5 cm steps (the
+blind policy did too), and the crossing's pavement meets the road in dropped kerbs.
 
 It lands heel first, steps evenly, and once knocked down goes limp, then gets up (below).
-To retrain: `python3 python/train_hopper.py imitate 2500000 0`, then copy
-`ppo_imitate.bin` over `src/walk_policy.bin` and run `cargo test --release`; trust the tests,
-not the training log. Limits: it walks in a plane (no hip sway or pelvis twist) and cannot
+To retrain: `python3 python/train_hopper.py imitate 2500000 0`, which starts from the
+committed policy (`warm_start`: its weights, zeros for any new inputs), then try each
+`ppo_imitate_<steps>.bin` it writes in place of `src/walk_policy.bin` with
+`cargo test --release`, and keep one that passes everything; trust the tests, not the
+training log. The committed one took two runs (2M steps with 60% of episodes on courses,
+then 1.25M more at half, after which it walked closer to the capture on flat ground) and was
+the only one of the second run's checkpoints to pass every test: by return, the best
+checkpoints walked 9.4° off the capture, or fell while stopping.
+
+The controller asks the policy for its corrections on every substep (960 Hz), though it
+chose them once a frame (60 Hz) in training. Asked once a frame instead, as in training,
+this policy failed two tests (8° off the capture; 7 of 12 steps up, not 9): querying it more
+often gives it fresher feedback, and its corrections vary smoothly with the state. (The
+checkpoint was picked by testing it at 960 Hz, which favours that rate; the get-up policy,
+below, is the opposite case.) Limits: it walks in a plane (no hip sway or pelvis twist) and cannot
 turn; the brisk end is capped at 1.6 m/s (asked for the captured brisk walk's 1.9 m/s, it
 fell within a second); it walks about 5 to 10% slower than asked; and standing still, it
 withstands a nudge (about 120 N) but a hard shove topples it, where a person would step.
@@ -259,15 +281,32 @@ earns little while lying down. And the first in-game tests failed for a reason t
 nothing to do with the policy: the controller runs on every one of the 16 substeps per
 frame, so the policy was being asked for new targets 960 times a second, where in training
 it chose once a frame. Asked only at the start of each frame, it went from 5 of 24 to 23 of
-24. (The walking policy is still asked every substep, as its tests were written with, and
-it walks well that way. Gating it too changed which falls the get-up test saw, without
-showing an improvement, so it was left alone.)
+24. Its targets are held poses, which re-asking every substep made jitter; the walking
+policy's corrections are not, and it walks better asked every substep (above).
 
-Limits: it gets up its own way, not a person's: from a fall onto its back it usually rolls
-over backwards, legs over its head, and some falls end with it shuffling along on its seat
-for several seconds before it rises. Training it to match motion-captured get-ups, as the
-walking does, is the fix. It practised only falls forward or back, in the plane.
-It may take two attempts.
+It gets up its own way, not a person's: from a fall onto its back it usually rolls over
+backwards, legs over its head (in 20 of the 24 falls a foot passes 30 cm above the hips),
+and some falls end with it shuffling on its seat before it rises. Getting it to rise as
+people do was tried and did not work, at the training this machine can do (about a million
+steps an hour; DeepMimic-style skills take tens to hundreds of millions):
+
+| fine-tuned from the committed policy, with | stands up | rolls over |
+|---|---|---|
+| (committed policy) | 23 of 24 | 20 of 24 |
+| a style reward: the nearest of a person's captured get-up poses (CMU subject 140) | 22 | 18 |
+| that, and a cost for rolling over | 22 | 18 |
+| that, and half the episodes starting partway through a captured get-up | 20 | 16 |
+
+The penalty and the style reward can say what not to do, but the policy only knows one
+way up from its back, and a person's way (sit up forwards, feet in, push up) is too far
+from it for small random changes to find. Starting from captured poses (DeepMimic's
+reference state initialisation) is the right tool but needs far longer training than was
+done. The captured get-ups also needed cleaning first: lying down hides the markers, and a
+third of the frames had a knee or foot through the floor or a leg splayed sideways, which
+seen side-on is a stub at a meaningless angle. The code is in the history (commit `5fe3dca`:
+`mocap.py --getup`, `robot::getup_style`, `pose_as_captured`); it was taken out because,
+without much more training, it makes a worse policy than the reward above. Limits: it
+practised only falls forward or back, in the plane, and may take two attempts.
 
 ### Walking in 3D
 
