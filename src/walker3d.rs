@@ -2,11 +2,12 @@
 //! joints it lacks to balance sideways and turn. The root can yaw, roll and pitch; each hip
 //! swings forward, out to the side and twists; each ankle pitches and rolls. 22 joints.
 //!
-//! It walks by SIMBICON in 3D (Yin, Loken and van de Panne, 2007): the planar walker's
-//! hand-tuned gait for the forward motion, and for the sideways motion the same idea turned
-//! through a right angle: the swing foot lands further out the further and faster the body
-//! is moving that way, and the stance hip holds the torso level and facing forward. It is a
-//! hand-written controller, not a learned one.
+//! It walks as the planar walker does, by the motion-capture controller (`robot::imitate`)
+//! with a learned policy correcting it, run on a planar stand-in that copies this body's
+//! forward-plane joints (`drive3d`). Sideways it balances by SIMBICON's rule (Yin, Loken and
+//! van de Panne, 2007) turned through a right angle: the swing foot lands further out the
+//! further and faster the body is moving that way, and the stance hip holds the torso level
+//! and facing forward. The policy (`env::Task::Walk3d`), trained in 3D, corrects both.
 
 use crate::Vec3;
 use crate::robot::{JointKind, Link, Robot};
@@ -36,8 +37,15 @@ const KNEE: usize = 3;
 const ANKLE: usize = 4;
 const FOOT: usize = 5;
 
-/// The 3D walker, standing at the origin facing +x and moving at 0.4 m/s.
+/// The 3D walker under its trained policy, starting mid-stride at walking speed, facing +x.
 pub fn walker3d() -> Robot {
+    let mut r = walker3d_in_stride(crate::robot::WALKING_SPEED, 0.5);
+    r.controller = Some(mimic3d);
+    r
+}
+
+/// The 3D walker's body: links and motors, at rest at the origin, no controller.
+fn body() -> Robot {
     let free = |parent: Option<usize>, kind, axis| {
         Link::new(parent, kind, axis, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.0)
     };
@@ -164,119 +172,13 @@ pub fn walker3d() -> Robot {
     let mut r = Robot::new(links);
     r.ground = true;
     r.q[1] = 0.44 + 0.42 + 0.075 + 0.005;
-    r.qd[0] = 0.4;
-    r.controller = Some(walk3d);
     r
 }
 
-/// The planar walker's hand-tuned SIMBICON gait (it walked without learning before motion
-/// capture replaced it): two target poses a step, swinging then reaching for the ground.
-struct Pose {
-    swing_hip: f64,
-    swing_knee: f64,
-    swing_ankle: f64,
-    stance_knee: f64,
-}
-const SWINGING: Pose = Pose {
-    swing_hip: 0.411,
-    swing_knee: -1.097,
-    swing_ankle: 0.335,
-    stance_knee: -0.024,
-};
-const LANDING: Pose = Pose {
-    swing_hip: -0.067,
-    swing_knee: -0.059,
-    swing_ankle: 0.237,
-    stance_knee: -0.056,
-};
-const SWING_TIME: f64 = 0.498;
-/// Forward balance: swing hip angle per metre the body is ahead of the stance foot, and per
-/// m/s; sideways, the same for the swing hip's angle out to the side.
-const FORWARD_GAINS: (f64, f64) = (0.62, 0.229);
-/// (Found by grids scored on shoves survived and sideways drift from a standing start: this
-/// pair survives 12 of 16 shoves and drifts 1.3 m; neighbours fall, so the band is narrow.)
+/// Sideways balance: the swing hip's angle out to the side per metre the body is beside the
+/// stance foot, and per m/s it moves that way. (Found by grids for the hand-written 3D
+/// SIMBICON this walker began with, on shoves survived and drift; the policy corrects it.)
 const SIDEWAYS_GAINS: (f64, f64) = (0.5, 0.3);
-const LEAN: f64 = 0.011;
-const PUSH_OFF: f64 = -0.295;
-const SPEED: f64 = 1.3;
-const KNEE_STIFFNESS: f64 = 664.0;
-const ANKLE_STIFFNESS: f64 = 287.0;
-
-/// SIMBICON in three dimensions; see the module notes.
-pub fn walk3d(r: &mut Robot) {
-    let [stance_side, step_start, steps, mut landing_start, ..] = r.memory;
-    let side = stance_side as usize;
-    let (stance, swing) = (LEGS[side], LEGS[1 - side]);
-    let frames = r.frames(&r.q);
-    let pitch = r.q[TORSO];
-    if landing_start.is_infinite()
-        && (r.time - step_start > SWING_TIME || pitch + r.q[stance + THIGH] < -0.25)
-    {
-        landing_start = r.time;
-        r.memory[3] = r.time;
-    }
-    if r.time > landing_start && sole(r, &frames, swing + FOOT) < 0.005 {
-        r.memory[..4].copy_from_slice(&[1.0 - stance_side, r.time, steps + 1.0, f64::INFINITY]);
-        return walk3d(r);
-    }
-    let (com, com_vel) = centre_of_mass(r, &frames);
-    let ankle = frames[stance + FOOT].0;
-    let blend = {
-        let x = ((r.time - landing_start) / 0.1).clamp(0.0, 1.0);
-        x * x * (3.0 - 2.0 * x)
-    };
-    let mix = |a: f64, b: f64| a + (b - a) * blend;
-    let target = Pose {
-        swing_hip: mix(SWINGING.swing_hip, LANDING.swing_hip),
-        swing_knee: mix(SWINGING.swing_knee, LANDING.swing_knee),
-        swing_ankle: mix(SWINGING.swing_ankle, LANDING.swing_ankle),
-        stance_knee: mix(SWINGING.stance_knee, LANDING.stance_knee),
-    };
-    let qd = &r.qd;
-    let q = &r.q;
-    let pd = |angle: f64, rate: f64, want: f64, kp: f64| kp * (want - angle) - 0.1 * kp * rate;
-    let mut torque = vec![0.0; q.len()];
-    // Forward: SIMBICON, as in the planar walker.
-    let aim = target.swing_hip + FORWARD_GAINS.0 * (com.x - ankle.x) + FORWARD_GAINS.1 * com_vel.x;
-    let swing_hip = pd(
-        pitch + q[swing + THIGH],
-        qd[TORSO] + qd[swing + THIGH],
-        aim,
-        300.0,
-    );
-    torque[swing + THIGH] = swing_hip;
-    torque[stance + THIGH] = -pd(pitch, qd[TORSO], LEAN, 600.0) - swing_hip;
-    torque[swing + KNEE] = pd(q[swing + KNEE], qd[swing + KNEE], target.swing_knee, 300.0);
-    let effort = (1.0 + (SPEED - com_vel.x)).clamp(0.0, 1.0);
-    torque[swing + ANKLE] = if sole(r, &frames, swing + FOOT) < 0.005 {
-        pd(
-            q[swing + ANKLE],
-            qd[swing + ANKLE],
-            PUSH_OFF * effort,
-            ANKLE_STIFFNESS,
-        )
-    } else {
-        pd(
-            q[swing + ANKLE],
-            qd[swing + ANKLE],
-            target.swing_ankle,
-            30.0,
-        )
-    };
-    torque[stance + KNEE] = pd(
-        q[stance + KNEE],
-        qd[stance + KNEE],
-        target.stance_knee,
-        KNEE_STIFFNESS,
-    );
-    torque[stance + ANKLE] = pd(q[stance + ANKLE], qd[stance + ANKLE], 0.0, ANKLE_STIFFNESS);
-    sideways(r, &frames, side, [0.0; 2], &mut torque);
-    swing_arms(r, &mut torque);
-    for (i, t) in torque.iter().enumerate().skip(TORSO + 1) {
-        r.ctrl[i] = t / r.links[i].gear;
-    }
-    r.target = Some(Vec3::new(com.x, 0.02, com.z));
-}
 
 /// Height of the lowest corner of `foot`'s box above the floor.
 fn sole(r: &Robot, frames: &[(Vec3, crate::Quat)], foot: usize) -> f64 {
@@ -334,7 +236,7 @@ pub fn mimic3d(r: &mut Robot) {
 /// and the corrections in `Robot::adjust` (`env::WALK3D_ACTIONS` of them: the planar policy's
 /// six, then the swing foot's sideways aim and the heading, in radians). Forward motion,
 /// stepping and stopping are worked out on a planar stand-in that copies this body's
-/// forward-plane joints; sideways balance, turning and the feet's roll as in `walk3d`.
+/// forward-plane joints; sideways balance, turning and the feet's roll by `sideways`.
 pub fn drive3d(r: &mut Robot) {
     let mut planar = r
         .shadow
@@ -408,7 +310,7 @@ pub fn walk3d_obs(r: &Robot) -> Vec<f64> {
 /// The 3D walker started as the planar walker starts in stride (`robot::start_in_stride`):
 /// at `pace` m/s, `phase` of the way through a step, under `drive3d` (no policy yet).
 pub fn walker3d_in_stride(pace: f64, phase: f64) -> Robot {
-    let mut r = walker3d();
+    let mut r = body();
     let mut planar = crate::robot::walker();
     planar.command = pace;
     crate::robot::start_in_stride(&mut planar, phase);

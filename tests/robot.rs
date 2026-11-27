@@ -626,11 +626,42 @@ fn walker_crosses_uneven_ground() {
 }
 
 #[test]
+fn walker_takes_kerbs_and_steep_slopes() {
+    // It sees the floor ahead (`robot::walk_obs`) and trained on random courses of steps and
+    // slopes, so it lifts its feet for a step up and leans back down a steep hill. Each case
+    // with the step or slope starting at four points of the stride, as where a foot lands
+    // decides a lot; a pass is 10 s walked without falling. (Trained on flat ground only, it
+    // managed 4 of 12 steps up, 9 of 12 down, 2 of 8 descents.)
+    let walks = |terrain: Vec<[f64; 2]>| {
+        let mut r = robot::walker();
+        r.terrain = terrain;
+        robot::start_in_stride(&mut r, 0.0);
+        (0..(10.0 / DT) as usize).all(|_| {
+            r.step(DT, 16);
+            robot::hip_height(&r) > 0.7 && r.q[TORSO].abs() < 0.6
+        })
+    };
+    let at = [2.5, 3.0, 3.5, 4.0];
+    let passes =
+        |make: &dyn Fn(f64) -> Vec<[f64; 2]>| at.iter().filter(|&&x| walks(make(x))).count();
+    let step = |h: f64| move |x: f64| vec![[x, 0.0], [x + 0.01, h], [40.0, h]];
+    let slope = |g: f64| move |x: f64| vec![[x, 0.0], [x + 15.0, 15.0 * g]];
+    let up: usize = [0.08, 0.10, 0.12].map(|h| passes(&step(h))).iter().sum();
+    let down: usize = [0.08, 0.10, 0.12].map(|h| passes(&step(-h))).iter().sum();
+    let descents: usize = [0.12, 0.15].map(|g| passes(&slope(-g))).iter().sum();
+    println!("steps up 8-12 cm: {up}/12; down: {down}/12; descents of 12-15%: {descents}/8");
+    assert!(up >= 8, "only {up} of 12 steps up");
+    assert!(down >= 11, "only {down} of 12 steps down");
+    assert!(descents >= 7, "only {descents} of 8 steep descents");
+}
+
+#[test]
 fn walker_in_3d_walks_and_catches_itself_sideways() {
-    // The 3D body, free to fall sideways and turn, under its hand-written 3D SIMBICON: it
-    // walks 12 s, and sideways shoves (about 120 and 200 N for 0.2 s, either way, at four
-    // moments of the stride) mostly make it step out and recover. Mostly: this controller
-    // works in a narrow band, so the test asks for 10 of 16, not all.
+    // The 3D body, free to fall sideways and turn, under the motion-capture controller and its
+    // policy trained in 3D: it walks 12 s at the captured pace, keeping fairly straight, and
+    // sideways shoves (about 120 and 200 N for 0.2 s, either way, at four moments of the
+    // stride) mostly make it step out and recover. (The hand-written 3D SIMBICON it replaced
+    // walked 10.7 m, drifted 1.3 m and survived 12 of the 16.)
     use physics_simulator::walker3d::{self, ROLL, TORSO};
     let walk = |shove: f64, at: usize| {
         let mut r = walker3d::walker3d();
@@ -647,10 +678,9 @@ fn walker_in_3d_walks_and_catches_itself_sideways() {
         }
         Some((r.q[0], r.q[2]))
     };
-    // Starting from standing tips it sideways at first; it settles, having drifted about 1.3 m.
     let (distance, drift) = walk(0.0, 0).expect("fell without being shoved");
-    assert!(distance > 8.0, "only {distance:.1} m in 12 s");
-    assert!(drift.abs() < 1.8, "drifted {drift:.1} m sideways");
+    assert!(distance > 12.0, "only {distance:.1} m in 12 s");
+    assert!(drift.abs() < 1.3, "drifted {drift:.1} m sideways");
     let shoves = [0.03, -0.03, 0.05, -0.05];
     let survived = shoves
         .iter()
